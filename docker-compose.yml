@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # YDB Database
+  ydb:
+    image: cr.yandex/yc/yandex-docker-local-ydb:latest
+    platform: linux/amd64
+    hostname: localhost
+    container_name: gdc-ydb
+    environment:
+      - GRPC_TLS_PORT=2135
+      - GRPC_PORT=2136
+      - MON_PORT=8765
+    ports:
+      - "2135:2135"
+      - "2136:2136" 
+      - "8765:8765"
+    volumes:
+      - ydb_data:/ydb_data
+    networks:
+      - gdc-network
+
+  # NATS JetStream
+  nats:
+    image: nats:2.10-alpine
+    container_name: gdc-nats
+    command: 
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "--max_file_store=1GB"
+      - "--max_mem_store=256MB"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats_data:/data
+    networks:
+      - gdc-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: gdc-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - gdc-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: gdc-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - gdc-network
+    depends_on:
+      - prometheus
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.47
+    container_name: gdc-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    networks:
+      - gdc-network
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: gdc-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - gdc-network
+
+  # Global Data Controller
+  gdc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gdc-server
+    environment:
+      - GDC_DATABASE_ENDPOINT=grpc://ydb:2136
+      - GDC_DATABASE_DATABASE=/local
+      - GDC_EVENTBUS_URL=nats://nats:4222
+      - GDC_TELEMETRY_JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+      - GDC_TELEMETRY_ENABLED=true
+    ports:
+      - "8080:8080"   # HTTP API
+      - "9090:9090"   # gRPC API  
+      - "9091:9091"   # Metrics
+    volumes:
+      - ./configs:/etc/gdc
+    networks:
+      - gdc-network
+    depends_on:
+      - ydb
+      - nats
+      - prometheus
+      - jaeger
+    profiles:
+      - full
+
+volumes:
+  ydb_data:
+  nats_data:
+  prometheus_data:
+  grafana_data:
+  redis_data:
+
+networks:
+  gdc-network:
+    driver: bridge

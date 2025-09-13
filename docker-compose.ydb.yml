@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  ydb:
+    image: cr.yandex/yc/yandex-docker-local-ydb:latest
+    hostname: localhost
+    container_name: gdc-ydb-local
+    environment:
+      - GRPC_TLS_PORT=2135
+      - GRPC_PORT=2136
+      - MON_PORT=8765
+      - YDB_DEFAULT_LOG_LEVEL=NOTICE
+      - YDB_USE_IN_MEMORY_PDISKS=true
+      - YDB_TABLE_ENABLE_PREPARED_DDL=true
+    ports:
+      - "2135:2135"  # gRPC TLS
+      - "2136:2136"  # gRPC
+      - "8765:8765"  # Monitoring UI
+    volumes:
+      - ydb_data:/ydb_data
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=localhost:2136"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ydb_data:
+    driver: local

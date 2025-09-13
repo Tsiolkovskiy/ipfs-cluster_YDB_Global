@@ -1,0 +1,44 @@
+# Global Data Controller Configuration
+
+# Server configuration
+server:
+  host: "0.0.0.0"
+  port: 8080
+  grpc_port: 9090
+  read_timeout: "30s"
+  write_timeout: "30s"
+
+# Database configuration (YDB)
+database:
+  endpoint: "grpc://localhost:2136"
+  database: "/local"
+  credentials: ""
+
+# Event bus configuration (NATS)
+eventbus:
+  url: "nats://localhost:4222"
+  cluster_id: "gdc-cluster"
+  client_id: "gdc-server"
+
+# Telemetry configuration
+telemetry:
+  enabled: true
+  service_name: "global-data-controller"
+  service_version: "1.0.0"
+  prometheus_port: 9091
+  jaeger_endpoint: ""  # Set to enable Jaeger tracing, e.g., "http://localhost:14268/api/traces"
+  sample_rate: 1.0     # 1.0 = 100% sampling, 0.1 = 10% sampling
+
+# Security configuration
+security:
+  spiffe_socket_path: "/tmp/spire-agent/public/api.sock"
+  tls_enabled: false
+  cert_file: ""
+  key_file: ""
+
+# Logging configuration
+logging:
+  level: "info"        # debug, info, warn, error, fatal
+  format: "json"       # json, console
+  output_path: "stdout" # stdout, stderr, or file path
+  error_path: "stderr"  # stdout, stderr, or file path

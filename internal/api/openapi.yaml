@@ -1,0 +1,1429 @@
+openapi: 3.0.3
+info:
+  title: Global Data Controller API
+  description: |
+    API for managing distributed IPFS clusters and content replication across geographic zones.
+    
+    The Global Data Controller (GDC) provides centralized management of IPFS clusters
+    in multiple geographic regions, enabling automated content replication, policy-based
+    placement, and intelligent load balancing.
+    
+    ## Features
+    - Zone and cluster management
+    - Content pinning and replication
+    - Policy-based placement rules
+    - Real-time topology monitoring
+    - Cost-aware optimization
+    
+  version: 1.0.0
+  contact:
+    name: Global Data Controller Team
+    email: gdc-team@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check if the service is healthy and operational
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: healthy
+                service: global-data-controller
+                timestamp: "2024-01-15T10:30:00Z"
+
+  /ready:
+    get:
+      summary: Readiness check
+      description: Check if the service is ready to serve requests
+      operationId: getReadiness
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /zones:
+    get:
+      summary: List zones
+      description: Get a list of all geographic zones
+      operationId: listZones
+      tags:
+        - Zones
+      responses:
+        '200':
+          description: List of zones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  zones:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Zone'
+                  count:
+                    type: integer
+                    description: Total number of zones
+              example:
+                zones:
+                  - id: zone-msk-1
+                    name: Moscow Primary
+                    region: RU-MSK
+                    status: active
+                    capabilities:
+                      storage_type: ssd
+                      network_tier: premium
+                count: 1
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Create zone
+      description: Create a new geographic zone
+      operationId: createZone
+      tags:
+        - Zones
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZoneCreate'
+            example:
+              name: Moscow Primary
+              region: RU-MSK
+              status: active
+              capabilities:
+                storage_type: ssd
+                network_tier: premium
+              coordinates:
+                latitude: 55.7558
+                longitude: 37.6176
+      responses:
+        '201':
+          description: Zone created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Zone'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /zones/{id}:
+    get:
+      summary: Get zone
+      description: Get a specific zone by ID
+      operationId: getZone
+      tags:
+        - Zones
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Zone ID
+          schema:
+            type: string
+          example: zone-msk-1
+      responses:
+        '200':
+          description: Zone details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Zone'
+        '404':
+          description: Zone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Update zone
+      description: Update a specific zone
+      operationId: updateZone
+      tags:
+        - Zones
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Zone ID
+          schema:
+            type: string
+          example: zone-msk-1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZoneUpdate'
+      responses:
+        '200':
+          description: Zone updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Zone'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Zone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Delete zone
+      description: Delete a specific zone
+      operationId: deleteZone
+      tags:
+        - Zones
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Zone ID
+          schema:
+            type: string
+          example: zone-msk-1
+      responses:
+        '204':
+          description: Zone deleted successfully
+        '404':
+          description: Zone not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /clusters:
+    get:
+      summary: List clusters
+      description: Get a list of IPFS clusters, optionally filtered by zone
+      operationId: listClusters
+      tags:
+        - Clusters
+      parameters:
+        - name: zone_id
+          in: query
+          description: Filter clusters by zone ID
+          schema:
+            type: string
+          example: zone-msk-1
+      responses:
+        '200':
+          description: List of clusters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clusters:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Cluster'
+                  count:
+                    type: integer
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Create cluster
+      description: Create a new IPFS cluster
+      operationId: createCluster
+      tags:
+        - Clusters
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClusterCreate'
+      responses:
+        '201':
+          description: Cluster created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cluster'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /clusters/{id}:
+    get:
+      summary: Get cluster
+      description: Get a specific cluster by ID
+      operationId: getCluster
+      tags:
+        - Clusters
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Cluster ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cluster details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cluster'
+        '404':
+          description: Cluster not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Update cluster
+      description: Update a specific cluster
+      operationId: updateCluster
+      tags:
+        - Clusters
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Cluster ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClusterUpdate'
+      responses:
+        '200':
+          description: Cluster updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cluster'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cluster not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Delete cluster
+      description: Delete a specific cluster
+      operationId: deleteCluster
+      tags:
+        - Clusters
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Cluster ID
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Cluster deleted successfully
+        '404':
+          description: Cluster not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /content/pin:
+    post:
+      summary: Pin content
+      description: Pin content to the distributed storage network
+      operationId: pinContent
+      tags:
+        - Content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PinRequest'
+            example:
+              cid: QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG
+              size: 1048576
+              policies:
+                - default-replication
+                - geo-distributed
+              constraints:
+                zones: "msk,nn"
+                storage_class: "ssd"
+              priority: 1
+      responses:
+        '202':
+          description: Pin request accepted and processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PinPlan'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /content/unpin/{cid}:
+    delete:
+      summary: Unpin content
+      description: Remove content from the distributed storage network
+      operationId: unpinContent
+      tags:
+        - Content
+      parameters:
+        - name: cid
+          in: path
+          required: true
+          description: Content ID (CID) to unpin
+          schema:
+            type: string
+          example: QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG
+      responses:
+        '202':
+          description: Unpin request accepted
+        '404':
+          description: Content not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /content/status/{cid}:
+    get:
+      summary: Get content status
+      description: Get the current status of pinned content
+      operationId: getContentStatus
+      tags:
+        - Content
+      parameters:
+        - name: cid
+          in: path
+          required: true
+          description: Content ID (CID)
+          schema:
+            type: string
+          example: QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG
+      responses:
+        '200':
+          description: Content status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PinStatus'
+        '404':
+          description: Content not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /content:
+    get:
+      summary: List content
+      description: List pinned content with optional filtering
+      operationId: listContent
+      tags:
+        - Content
+      parameters:
+        - name: status
+          in: query
+          description: Filter by content status
+          schema:
+            type: string
+            enum: [pending, pinned, replicated, failed]
+        - name: zone_id
+          in: query
+          description: Filter by zone ID
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: offset
+          in: query
+          description: Number of results to skip
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of content
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Content'
+                  count:
+                    type: integer
+
+  /policies:
+    get:
+      summary: List policies
+      description: Get a list of all replication and placement policies
+      operationId: listPolicies
+      tags:
+        - Policies
+      responses:
+        '200':
+          description: List of policies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Policy'
+                  count:
+                    type: integer
+
+    post:
+      summary: Create policy
+      description: Create a new replication or placement policy
+      operationId: createPolicy
+      tags:
+        - Policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyCreate'
+      responses:
+        '201':
+          description: Policy created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /policies/{id}:
+    get:
+      summary: Get policy
+      description: Get a specific policy by ID
+      operationId: getPolicy
+      tags:
+        - Policies
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Policy ID
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Policy details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '404':
+          description: Policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Update policy
+      description: Update a specific policy
+      operationId: updatePolicy
+      tags:
+        - Policies
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Policy ID
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyUpdate'
+      responses:
+        '200':
+          description: Policy updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      summary: Delete policy
+      description: Delete a specific policy
+      operationId: deletePolicy
+      tags:
+        - Policies
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Policy ID
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Policy deleted successfully
+        '404':
+          description: Policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /topology:
+    get:
+      summary: Get topology
+      description: Get the current global topology of zones and clusters
+      operationId: getTopology
+      tags:
+        - Topology
+      responses:
+        '200':
+          description: Global topology
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Topology'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, ready]
+          description: Health status
+        service:
+          type: string
+          description: Service name
+        timestamp:
+          type: string
+          format: date-time
+          description: Response timestamp
+      required:
+        - status
+        - service
+        - timestamp
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          description: Additional error details
+      required:
+        - code
+        - message
+
+    GeoCoordinates:
+      type: object
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          description: Latitude in decimal degrees
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          description: Longitude in decimal degrees
+      required:
+        - latitude
+        - longitude
+
+    Zone:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique zone identifier
+        name:
+          type: string
+          description: Human-readable zone name
+        region:
+          type: string
+          description: Geographic region code
+        status:
+          type: string
+          enum: [active, degraded, maintenance, offline]
+          description: Operational status
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Zone capabilities and features
+        coordinates:
+          $ref: '#/components/schemas/GeoCoordinates'
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+      required:
+        - id
+        - name
+        - region
+        - status
+        - created_at
+        - updated_at
+
+    ZoneCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable zone name
+        region:
+          type: string
+          description: Geographic region code
+        status:
+          type: string
+          enum: [active, degraded, maintenance, offline]
+          description: Operational status
+          default: active
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Zone capabilities and features
+        coordinates:
+          $ref: '#/components/schemas/GeoCoordinates'
+      required:
+        - name
+        - region
+
+    ZoneUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable zone name
+        region:
+          type: string
+          description: Geographic region code
+        status:
+          type: string
+          enum: [active, degraded, maintenance, offline]
+          description: Operational status
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Zone capabilities and features
+        coordinates:
+          $ref: '#/components/schemas/GeoCoordinates'
+
+    NodeResources:
+      type: object
+      properties:
+        cpu_cores:
+          type: integer
+          minimum: 1
+          description: Number of CPU cores
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Memory capacity in bytes
+        storage_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Storage capacity in bytes
+        network_mbps:
+          type: integer
+          minimum: 0
+          description: Network bandwidth in Mbps
+      required:
+        - cpu_cores
+        - memory_bytes
+        - storage_bytes
+        - network_mbps
+
+    NodeMetrics:
+      type: object
+      properties:
+        cpu_usage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: CPU usage ratio (0.0 to 1.0)
+        memory_usage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Memory usage ratio (0.0 to 1.0)
+        storage_usage:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Storage usage ratio (0.0 to 1.0)
+        network_in_mbps:
+          type: number
+          format: double
+          minimum: 0
+          description: Incoming network traffic in Mbps
+        network_out_mbps:
+          type: number
+          format: double
+          minimum: 0
+          description: Outgoing network traffic in Mbps
+        pinned_objects:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of pinned objects
+        last_updated:
+          type: string
+          format: date-time
+          description: Last metrics update timestamp
+      required:
+        - cpu_usage
+        - memory_usage
+        - storage_usage
+        - network_in_mbps
+        - network_out_mbps
+        - pinned_objects
+        - last_updated
+
+    Node:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique node identifier
+        cluster_id:
+          type: string
+          description: Parent cluster ID
+        address:
+          type: string
+          description: Node network address
+        status:
+          type: string
+          enum: [online, offline, draining]
+          description: Node operational status
+        resources:
+          $ref: '#/components/schemas/NodeResources'
+        metrics:
+          $ref: '#/components/schemas/NodeMetrics'
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+      required:
+        - id
+        - cluster_id
+        - address
+        - status
+        - resources
+        - created_at
+        - updated_at
+
+    Cluster:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique cluster identifier
+        zone_id:
+          type: string
+          description: Parent zone ID
+        name:
+          type: string
+          description: Human-readable cluster name
+        endpoint:
+          type: string
+          description: Cluster API endpoint
+        status:
+          type: string
+          enum: [healthy, degraded, offline]
+          description: Cluster operational status
+        version:
+          type: string
+          description: IPFS Cluster version
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+          description: Cluster nodes
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Cluster capabilities and features
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+      required:
+        - id
+        - zone_id
+        - name
+        - endpoint
+        - status
+        - nodes
+        - created_at
+        - updated_at
+
+    ClusterCreate:
+      type: object
+      properties:
+        zone_id:
+          type: string
+          description: Parent zone ID
+        name:
+          type: string
+          description: Human-readable cluster name
+        endpoint:
+          type: string
+          description: Cluster API endpoint
+        status:
+          type: string
+          enum: [healthy, degraded, offline]
+          description: Cluster operational status
+          default: healthy
+        version:
+          type: string
+          description: IPFS Cluster version
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Cluster capabilities and features
+      required:
+        - zone_id
+        - name
+        - endpoint
+
+    ClusterUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable cluster name
+        endpoint:
+          type: string
+          description: Cluster API endpoint
+        status:
+          type: string
+          enum: [healthy, degraded, offline]
+          description: Cluster operational status
+        version:
+          type: string
+          description: IPFS Cluster version
+        capabilities:
+          type: object
+          additionalProperties:
+            type: string
+          description: Cluster capabilities and features
+
+    PinRequest:
+      type: object
+      properties:
+        cid:
+          type: string
+          description: Content ID (CID) to pin
+          pattern: '^Qm[1-9A-HJ-NP-Za-km-z]{44}$|^b[A-Za-z2-7]{58}$'
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Content size in bytes (optional)
+        policies:
+          type: array
+          items:
+            type: string
+          description: Policy IDs to apply
+        constraints:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional placement constraints
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 10
+          default: 5
+          description: Pin priority (0=lowest, 10=highest)
+      required:
+        - cid
+
+    NodeAssignment:
+      type: object
+      properties:
+        node_id:
+          type: string
+          description: Target node ID
+        cluster_id:
+          type: string
+          description: Target cluster ID
+        zone_id:
+          type: string
+          description: Target zone ID
+        priority:
+          type: integer
+          minimum: 1
+          description: Assignment priority
+      required:
+        - node_id
+        - cluster_id
+        - zone_id
+        - priority
+
+    CostEstimate:
+      type: object
+      properties:
+        storage_cost:
+          type: number
+          format: double
+          minimum: 0
+          description: Estimated storage cost
+        egress_cost:
+          type: number
+          format: double
+          minimum: 0
+          description: Estimated egress cost
+        compute_cost:
+          type: number
+          format: double
+          minimum: 0
+          description: Estimated compute cost
+        total_cost:
+          type: number
+          format: double
+          minimum: 0
+          description: Total estimated cost
+        currency:
+          type: string
+          description: Cost currency code
+          default: USD
+      required:
+        - storage_cost
+        - egress_cost
+        - compute_cost
+        - total_cost
+        - currency
+
+    PinPlan:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique plan identifier
+        cid:
+          type: string
+          description: Content ID being pinned
+        assignments:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeAssignment'
+          description: Node assignments for replication
+        cost:
+          $ref: '#/components/schemas/CostEstimate'
+        created_at:
+          type: string
+          format: date-time
+          description: Plan creation timestamp
+      required:
+        - id
+        - cid
+        - assignments
+        - created_at
+
+    PinStatus:
+      type: object
+      properties:
+        cid:
+          type: string
+          description: Content ID
+        status:
+          type: string
+          enum: [pending, pinned, replicated, failed]
+          description: Current pin status
+        progress:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Completion progress (0.0 to 1.0)
+        error:
+          type: string
+          description: Error message if status is failed
+        updated_at:
+          type: string
+          format: date-time
+          description: Last status update timestamp
+      required:
+        - cid
+        - status
+        - progress
+        - updated_at
+
+    Replica:
+      type: object
+      properties:
+        node_id:
+          type: string
+          description: Node hosting the replica
+        cluster_id:
+          type: string
+          description: Cluster hosting the replica
+        zone_id:
+          type: string
+          description: Zone hosting the replica
+        status:
+          type: string
+          enum: [pending, pinned, failed, verified]
+          description: Replica status
+        created_at:
+          type: string
+          format: date-time
+          description: Replica creation timestamp
+        verified_at:
+          type: string
+          format: date-time
+          description: Last verification timestamp
+      required:
+        - node_id
+        - cluster_id
+        - zone_id
+        - status
+        - created_at
+
+    Content:
+      type: object
+      properties:
+        cid:
+          type: string
+          description: Content ID
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Content size in bytes
+        type:
+          type: string
+          description: Content type
+        replicas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Replica'
+          description: Content replicas
+        policies:
+          type: array
+          items:
+            type: string
+          description: Applied policy IDs
+        status:
+          type: string
+          enum: [pending, pinned, replicated, failed]
+          description: Overall content status
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional content metadata
+        created_at:
+          type: string
+          format: date-time
+          description: Content creation timestamp
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update timestamp
+      required:
+        - cid
+        - size
+        - replicas
+        - policies
+        - status
+        - created_at
+        - updated_at
+
+    Policy:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique policy identifier
+        name:
+          type: string
+          description: Human-readable policy name
+        version:
+          type: integer
+          minimum: 1
+          description: Policy version number
+        rules:
+          type: object
+          additionalProperties:
+            type: string
+          description: Rego policy rules
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Policy metadata
+        created_at:
+          type: string
+          format: date-time
+          description: Policy creation timestamp
+        created_by:
+          type: string
+          description: Policy creator
+      required:
+        - id
+        - name
+        - version
+        - rules
+        - created_at
+        - created_by
+
+    PolicyCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable policy name
+        rules:
+          type: object
+          additionalProperties:
+            type: string
+          description: Rego policy rules
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Policy metadata
+      required:
+        - name
+        - rules
+
+    PolicyUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable policy name
+        rules:
+          type: object
+          additionalProperties:
+            type: string
+          description: Rego policy rules
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Policy metadata
+
+    Topology:
+      type: object
+      properties:
+        zones:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Zone'
+          description: Map of zone ID to zone details
+        clusters:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Cluster'
+          description: Map of cluster ID to cluster details
+        updated_at:
+          type: string
+          format: date-time
+          description: Last topology update timestamp
+      required:
+        - zones
+        - clusters
+        - updated_at
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Health
+    description: Health and readiness checks
+  - name: Zones
+    description: Geographic zone management
+  - name: Clusters
+    description: IPFS cluster management
+  - name: Content
+    description: Content pinning and replication
+  - name: Policies
+    description: Replication and placement policies
+  - name: Topology
+    description: Global topology information
