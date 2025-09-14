@@ -1,0 +1,78 @@
+[cluster_nodes]
+node1 ansible_host=10.0.1.10 node_tier=hot
+node2 ansible_host=10.0.1.11 node_tier=warm  
+node3 ansible_host=10.0.1.12 node_tier=cold
+
+[cluster_nodes:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=~/.ssh/cluster_key
+
+# ZFS Configuration
+zfs_pools:
+  - name: hot-tier
+    devices: ["/dev/nvme0n1", "/dev/nvme1n1"]
+    options:
+      - "ashift=12"
+    properties:
+      - "compression=lz4"
+      - "recordsize=128K"
+      - "atime=off"
+  - name: warm-tier
+    devices: ["/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd"]
+    options:
+      - "ashift=12"
+    properties:
+      - "compression=gzip-6"
+      - "recordsize=1M"
+      - "atime=off"
+  - name: cold-tier
+    devices: ["/dev/sde", "/dev/sdf", "/dev/sdg", "/dev/sdh"]
+    options:
+      - "ashift=12"
+    properties:
+      - "compression=zstd"
+      - "recordsize=1M"
+      - "atime=off"
+
+zfs_datasets:
+  - pool: hot-tier
+    name: ipfs-cluster
+    properties:
+      mountpoint: /mnt/hot-tier
+  - pool: hot-tier
+    name: ipfs-cluster/metadata
+    properties:
+      mountpoint: /mnt/hot-tier/metadata
+  - pool: hot-tier
+    name: ipfs-cluster/hot-shards
+    properties:
+      mountpoint: /mnt/hot-tier/shards
+  - pool: warm-tier
+    name: ipfs-cluster
+    properties:
+      mountpoint: /mnt/warm-tier
+  - pool: warm-tier
+    name: ipfs-cluster/warm-shards
+    properties:
+      mountpoint: /mnt/warm-tier/shards
+  - pool: cold-tier
+    name: ipfs-cluster
+    properties:
+      mountpoint: /mnt/cold-tier
+  - pool: cold-tier
+    name: ipfs-cluster/cold-shards
+    properties:
+      mountpoint: /mnt/cold-tier/shards
+  - pool: cold-tier
+    name: ipfs-cluster/archive
+    properties:
+      mountpoint: /mnt/cold-tier/archive
+
+# Cluster Configuration
+cluster_name: "production-zfs-cluster"
+replication_factor_min: 2
+replication_factor_max: 3
+max_pins_per_shard: 1000000000
+concurrent_pins: 512
+performance_optimization: true
+auto_tuning_enabled: true

@@ -1,0 +1,624 @@
+package zfshttp
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
+	"github.com/pkg/errors"
+)
+
+// ZFSBlockstore implements a ZFS-aware blockstore that leverages ZFS features
+// for checksums, deduplication, and compression
+type ZFSBlockstore struct {
+	config      *Config
+	zfsManager  *ZFSManager
+	basePath    string
+	
+	// Block metadata cache
+	metadataCache map[string]*BlockMetadata
+	cacheMutex    sync.RWMutex
+	
+	// ZFS-specific features
+	useZFSChecksums bool
+	enableDedup     bool
+	compressionType string
+	
+	// Performance metrics
+	metrics *BlockstoreMetrics
+	
+	// Background optimization
+	optimizationTicker *time.Ticker
+	stopOptimization   chan struct{}
+}
+
+// BlockMetadata contains metadata about a block stored in ZFS
+type BlockMetadata struct {
+	CID              cid.Cid   `json:"cid"`
+	Size             int       `json:"size"`
+	ZFSPath          string    `json:"zfs_path"`
+	ZFSChecksum      string    `json:"zfs_checksum"`
+	CompressionRatio float64   `json:"compression_ratio"`
+	StoredAt         time.Time `json:"stored_at"`
+	LastAccessed     time.Time `json:"last_accessed"`
+	AccessCount      int64     `json:"access_count"`
+	Deduplicated     bool      `json:"deduplicated"`
+}
+
+// BlockstoreMetrics tracks blockstore performance metrics
+type BlockstoreMetrics struct {
+	TotalBlocks        int64
+	TotalSize          int64
+	CompressedSize     int64
+	DeduplicatedBlocks int64
+	CacheHits          int64
+	CacheMisses        int64
+	ZFSChecksumErrors  int64
+	ReadOperations     int64
+	WriteOperations    int64
+	DeleteOperations   int64
+	mutex              sync.RWMutex
+}
+
+// NewZFSBlockstore creates a new ZFS-aware blockstore
+func NewZFSBlockstore(cfg *Config, zfsManager *ZFSManager, basePath string) (*ZFSBlockstore, error) {
+	// Ensure base path exists
+	if err := os.MkdirAll(basePath, 0755); err != nil {
+		return nil, errors.Wrapf(err, "creating base path %s", basePath)
+	}
+	
+	// Create ZFS dataset for blocks if it doesn't exist
+	blocksDataset := cfg.GetDatasetPath() + "/blocks"
+	if err := zfsManager.CreateDataset(blocksDataset); err != nil {
+		return nil, errors.Wrap(err, "creating blocks dataset")
+	}
+	
+	zbs := &ZFSBlockstore{
+		config:            cfg,
+		zfsManager:        zfsManager,
+		basePath:          basePath,
+		metadataCache:     make(map[string]*BlockMetadata),
+		useZFSChecksums:   true,
+		enableDedup:       cfg.Deduplication,
+		compressionType:   cfg.Compression,
+		metrics:           &BlockstoreMetrics{},
+		stopOptimization:  make(chan struct{}),
+	}
+	
+	// Start background optimization if enabled
+	if cfg.AutoOptimize {
+		zbs.startOptimization()
+	}
+	
+	return zbs, nil
+}
+
+// DeleteBlock removes a block from the blockstore
+func (zbs *ZFSBlockstore) DeleteBlock(ctx context.Context, c cid.Cid) error {
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.DeleteOperations++
+	zbs.metrics.mutex.Unlock()
+	
+	// Get block path
+	blockPath := zbs.getBlockPath(c)
+	
+	// Remove from cache
+	zbs.removeFromCache(c.String())
+	
+	// Remove file
+	err := os.Remove(blockPath)
+	if err != nil && !os.IsNotExist(err) {
+		return errors.Wrapf(err, "removing block file %s", blockPath)
+	}
+	
+	// Update metrics
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.TotalBlocks--
+	zbs.metrics.mutex.Unlock()
+	
+	return nil
+}
+
+// Has checks if a block exists in the blockstore
+func (zbs *ZFSBlockstore) Has(ctx context.Context, c cid.Cid) (bool, error) {
+	// Check cache first
+	if _, found := zbs.getFromCache(c.String()); found {
+		return true, nil
+	}
+	
+	// Check file system
+	blockPath := zbs.getBlockPath(c)
+	_, err := os.Stat(blockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, errors.Wrapf(err, "checking block %s", c.String())
+	}
+	
+	return true, nil
+}
+
+// Get retrieves a block from the blockstore
+func (zbs *ZFSBlockstore) Get(ctx context.Context, c cid.Cid) (blocks.Block, error) {
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.ReadOperations++
+	zbs.metrics.mutex.Unlock()
+	
+	cidStr := c.String()
+	
+	// Check cache first
+	if metadata, found := zbs.getFromCache(cidStr); found {
+		zbs.metrics.mutex.Lock()
+		zbs.metrics.CacheHits++
+		zbs.metrics.mutex.Unlock()
+		
+		// Update access statistics
+		metadata.LastAccessed = time.Now()
+		metadata.AccessCount++
+		
+		// Read block data from file
+		data, err := os.ReadFile(metadata.ZFSPath)
+		if err != nil {
+			return nil, errors.Wrapf(err, "reading block file %s", metadata.ZFSPath)
+		}
+		
+		// Verify ZFS checksum if enabled
+		if zbs.useZFSChecksums && metadata.ZFSChecksum != "" {
+			if err := zbs.verifyZFSChecksum(data, metadata.ZFSChecksum); err != nil {
+				zbs.metrics.mutex.Lock()
+				zbs.metrics.ZFSChecksumErrors++
+				zbs.metrics.mutex.Unlock()
+				return nil, errors.Wrap(err, "ZFS checksum verification failed")
+			}
+		}
+		
+		return blocks.NewBlockWithCid(data, c)
+	}
+	
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.CacheMisses++
+	zbs.metrics.mutex.Unlock()
+	
+	// Read from file system
+	blockPath := zbs.getBlockPath(c)
+	data, err := os.ReadFile(blockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, blockstore.ErrNotFound
+		}
+		return nil, errors.Wrapf(err, "reading block file %s", blockPath)
+	}
+	
+	// Create block metadata
+	metadata := &BlockMetadata{
+		CID:          c,
+		Size:         len(data),
+		ZFSPath:      blockPath,
+		StoredAt:     time.Now(), // This would be read from file stats in production
+		LastAccessed: time.Now(),
+		AccessCount:  1,
+	}
+	
+	// Get ZFS checksum if available
+	if zbs.useZFSChecksums {
+		checksum, err := zbs.getZFSChecksum(blockPath)
+		if err == nil {
+			metadata.ZFSChecksum = checksum
+		}
+	}
+	
+	// Get compression ratio
+	if zbs.compressionType != "off" {
+		ratio, err := zbs.getCompressionRatio(blockPath)
+		if err == nil {
+			metadata.CompressionRatio = ratio
+		}
+	}
+	
+	// Add to cache
+	zbs.addToCache(cidStr, metadata)
+	
+	return blocks.NewBlockWithCid(data, c)
+}
+
+// GetSize returns the size of a block
+func (zbs *ZFSBlockstore) GetSize(ctx context.Context, c cid.Cid) (int, error) {
+	// Check cache first
+	if metadata, found := zbs.getFromCache(c.String()); found {
+		return metadata.Size, nil
+	}
+	
+	// Get file info
+	blockPath := zbs.getBlockPath(c)
+	info, err := os.Stat(blockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, blockstore.ErrNotFound
+		}
+		return 0, errors.Wrapf(err, "getting block size %s", c.String())
+	}
+	
+	return int(info.Size()), nil
+}
+
+// Put stores a block in the blockstore
+func (zbs *ZFSBlockstore) Put(ctx context.Context, block blocks.Block) error {
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.WriteOperations++
+	zbs.metrics.mutex.Unlock()
+	
+	c := block.Cid()
+	data := block.RawData()
+	
+	// Get block path
+	blockPath := zbs.getBlockPath(c)
+	
+	// Ensure directory exists
+	dir := filepath.Dir(blockPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return errors.Wrapf(err, "creating directory %s", dir)
+	}
+	
+	// Check if block already exists (deduplication)
+	if zbs.enableDedup {
+		if exists, err := zbs.Has(ctx, c); err == nil && exists {
+			// Block already exists, update access time and return
+			if metadata, found := zbs.getFromCache(c.String()); found {
+				metadata.LastAccessed = time.Now()
+				metadata.AccessCount++
+				metadata.Deduplicated = true
+				
+				zbs.metrics.mutex.Lock()
+				zbs.metrics.DeduplicatedBlocks++
+				zbs.metrics.mutex.Unlock()
+			}
+			return nil
+		}
+	}
+	
+	// Write block data to file
+	// ZFS compression and deduplication will be applied automatically
+	if err := os.WriteFile(blockPath, data, 0644); err != nil {
+		return errors.Wrapf(err, "writing block file %s", blockPath)
+	}
+	
+	// Create block metadata
+	metadata := &BlockMetadata{
+		CID:          c,
+		Size:         len(data),
+		ZFSPath:      blockPath,
+		StoredAt:     time.Now(),
+		LastAccessed: time.Now(),
+		AccessCount:  1,
+		Deduplicated: false,
+	}
+	
+	// Get ZFS checksum
+	if zbs.useZFSChecksums {
+		checksum, err := zbs.getZFSChecksum(blockPath)
+		if err == nil {
+			metadata.ZFSChecksum = checksum
+		}
+	}
+	
+	// Get compression ratio
+	if zbs.compressionType != "off" {
+		ratio, err := zbs.getCompressionRatio(blockPath)
+		if err == nil {
+			metadata.CompressionRatio = ratio
+		}
+	}
+	
+	// Add to cache
+	zbs.addToCache(c.String(), metadata)
+	
+	// Update metrics
+	zbs.metrics.mutex.Lock()
+	zbs.metrics.TotalBlocks++
+	zbs.metrics.TotalSize += int64(len(data))
+	if metadata.CompressionRatio > 1.0 {
+		zbs.metrics.CompressedSize += int64(float64(len(data)) / metadata.CompressionRatio)
+	}
+	zbs.metrics.mutex.Unlock()
+	
+	return nil
+}
+
+// PutMany stores multiple blocks in the blockstore
+func (zbs *ZFSBlockstore) PutMany(ctx context.Context, blocks []blocks.Block) error {
+	// Use ZFS transaction-like behavior by creating a snapshot before bulk operations
+	if len(blocks) > 100 { // Only for large bulk operations
+		datasetPath := zbs.config.GetDatasetPath() + "/blocks"
+		snapshotName := fmt.Sprintf("bulk-put-%d", time.Now().Unix())
+		if err := zbs.zfsManager.CreateSnapshot(datasetPath, snapshotName); err != nil {
+			// Log error but continue - snapshots are optional
+		}
+	}
+	
+	// Store blocks individually
+	// In a production implementation, this could be optimized with batch operations
+	for _, block := range blocks {
+		if err := zbs.Put(ctx, block); err != nil {
+			return errors.Wrapf(err, "putting block %s", block.Cid().String())
+		}
+	}
+	
+	return nil
+}
+
+// AllKeysChan returns a channel of all block CIDs in the blockstore
+func (zbs *ZFSBlockstore) AllKeysChan(ctx context.Context) (<-chan cid.Cid, error) {
+	ch := make(chan cid.Cid)
+	
+	go func() {
+		defer close(ch)
+		
+		err := filepath.Walk(zbs.basePath, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			
+			if info.IsDir() {
+				return nil
+			}
+			
+			// Extract CID from file path
+			relPath, err := filepath.Rel(zbs.basePath, path)
+			if err != nil {
+				return err
+			}
+			
+			// Parse CID from path
+			c, err := zbs.pathToCID(relPath)
+			if err != nil {
+				return nil // Skip invalid files
+			}
+			
+			select {
+			case ch <- c:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			
+			return nil
+		})
+		
+		if err != nil {
+			// Log error in production
+		}
+	}()
+	
+	return ch, nil
+}
+
+// HashOnRead returns false as ZFS provides checksums
+func (zbs *ZFSBlockstore) HashOnRead(enabled bool) {
+	// ZFS provides checksums, so we don't need to hash on read
+	// This is a no-op for ZFS blockstore
+}
+
+// Close closes the blockstore and cleans up resources
+func (zbs *ZFSBlockstore) Close() error {
+	// Stop background optimization
+	if zbs.optimizationTicker != nil {
+		zbs.optimizationTicker.Stop()
+		close(zbs.stopOptimization)
+	}
+	
+	// Clear cache
+	zbs.cacheMutex.Lock()
+	zbs.metadataCache = nil
+	zbs.cacheMutex.Unlock()
+	
+	return nil
+}
+
+// Helper methods
+
+func (zbs *ZFSBlockstore) getBlockPath(c cid.Cid) string {
+	// Use a directory structure based on CID prefix for better distribution
+	cidStr := c.String()
+	if len(cidStr) < 4 {
+		return filepath.Join(zbs.basePath, cidStr)
+	}
+	
+	// Create subdirectories based on first 2 characters for better performance
+	return filepath.Join(zbs.basePath, cidStr[:2], cidStr[2:4], cidStr)
+}
+
+func (zbs *ZFSBlockstore) pathToCID(path string) (cid.Cid, error) {
+	// Extract CID from file path
+	// This is a simplified implementation
+	parts := strings.Split(path, string(filepath.Separator))
+	if len(parts) == 0 {
+		return cid.Undef, fmt.Errorf("invalid path")
+	}
+	
+	cidStr := parts[len(parts)-1]
+	return cid.Decode(cidStr)
+}
+
+// Cache management
+
+func (zbs *ZFSBlockstore) addToCache(key string, metadata *BlockMetadata) {
+	zbs.cacheMutex.Lock()
+	defer zbs.cacheMutex.Unlock()
+	
+	// Simple cache size management - in production, use proper LRU
+	if len(zbs.metadataCache) > 10000 {
+		// Remove oldest entry
+		for k := range zbs.metadataCache {
+			delete(zbs.metadataCache, k)
+			break
+		}
+	}
+	
+	zbs.metadataCache[key] = metadata
+}
+
+func (zbs *ZFSBlockstore) getFromCache(key string) (*BlockMetadata, bool) {
+	zbs.cacheMutex.RLock()
+	defer zbs.cacheMutex.RUnlock()
+	
+	metadata, found := zbs.metadataCache[key]
+	return metadata, found
+}
+
+func (zbs *ZFSBlockstore) removeFromCache(key string) {
+	zbs.cacheMutex.Lock()
+	defer zbs.cacheMutex.Unlock()
+	
+	delete(zbs.metadataCache, key)
+}
+
+// ZFS-specific methods
+
+func (zbs *ZFSBlockstore) getZFSChecksum(filePath string) (string, error) {
+	// Get ZFS checksum for the file
+	// This is a simplified implementation - in production, use ZFS APIs
+	hash := sha256.Sum256([]byte(filePath)) // Placeholder
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func (zbs *ZFSBlockstore) verifyZFSChecksum(data []byte, expectedChecksum string) error {
+	// Verify data against ZFS checksum
+	// This is a simplified implementation
+	hash := sha256.Sum256(data)
+	actualChecksum := hex.EncodeToString(hash[:])
+	
+	if actualChecksum != expectedChecksum {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, actualChecksum)
+	}
+	
+	return nil
+}
+
+func (zbs *ZFSBlockstore) getCompressionRatio(filePath string) (float64, error) {
+	// Get compression ratio for the file from ZFS
+	// This would use ZFS APIs in production
+	return 2.0, nil // Placeholder
+}
+
+// Background optimization
+
+func (zbs *ZFSBlockstore) startOptimization() {
+	zbs.optimizationTicker = time.NewTicker(time.Hour) // Optimize every hour
+	
+	go func() {
+		for {
+			select {
+			case <-zbs.optimizationTicker.C:
+				zbs.performOptimization()
+			case <-zbs.stopOptimization:
+				return
+			}
+		}
+	}()
+}
+
+func (zbs *ZFSBlockstore) performOptimization() {
+	// Optimize ZFS dataset
+	datasetPath := zbs.config.GetDatasetPath() + "/blocks"
+	ctx := context.Background()
+	
+	if err := zbs.zfsManager.OptimizeDataset(ctx, datasetPath); err != nil {
+		// Log error but continue
+	}
+	
+	// Clean up cache of old entries
+	zbs.cleanupCache()
+}
+
+func (zbs *ZFSBlockstore) cleanupCache() {
+	zbs.cacheMutex.Lock()
+	defer zbs.cacheMutex.Unlock()
+	
+	now := time.Now()
+	for key, metadata := range zbs.metadataCache {
+		// Remove entries not accessed in the last hour
+		if now.Sub(metadata.LastAccessed) > time.Hour {
+			delete(zbs.metadataCache, key)
+		}
+	}
+}
+
+// GetMetrics returns current blockstore metrics
+func (zbs *ZFSBlockstore) GetMetrics() *BlockstoreMetrics {
+	zbs.metrics.mutex.RLock()
+	defer zbs.metrics.mutex.RUnlock()
+	
+	// Return a copy to avoid race conditions
+	return &BlockstoreMetrics{
+		TotalBlocks:        zbs.metrics.TotalBlocks,
+		TotalSize:          zbs.metrics.TotalSize,
+		CompressedSize:     zbs.metrics.CompressedSize,
+		DeduplicatedBlocks: zbs.metrics.DeduplicatedBlocks,
+		CacheHits:          zbs.metrics.CacheHits,
+		CacheMisses:        zbs.metrics.CacheMisses,
+		ZFSChecksumErrors:  zbs.metrics.ZFSChecksumErrors,
+		ReadOperations:     zbs.metrics.ReadOperations,
+		WriteOperations:    zbs.metrics.WriteOperations,
+		DeleteOperations:   zbs.metrics.DeleteOperations,
+	}
+}
+
+// GetBlockMetadata returns metadata for a specific block
+func (zbs *ZFSBlockstore) GetBlockMetadata(c cid.Cid) (*BlockMetadata, error) {
+	if metadata, found := zbs.getFromCache(c.String()); found {
+		return metadata, nil
+	}
+	
+	return nil, fmt.Errorf("block metadata not found for %s", c.String())
+}
+
+// OptimizeLayout optimizes the physical layout of blocks on ZFS
+func (zbs *ZFSBlockstore) OptimizeLayout() error {
+	// This would implement ZFS-specific layout optimizations
+	// such as adjusting record sizes based on block size distribution
+	datasetPath := zbs.config.GetDatasetPath() + "/blocks"
+	
+	// Analyze block size distribution
+	sizes := zbs.analyzeBlockSizes()
+	
+	// Adjust ZFS record size based on analysis
+	optimalRecordSize := zbs.calculateOptimalRecordSize(sizes)
+	if optimalRecordSize != zbs.config.RecordSize {
+		return zbs.zfsManager.SetProperty(datasetPath, "recordsize", optimalRecordSize)
+	}
+	
+	return nil
+}
+
+func (zbs *ZFSBlockstore) analyzeBlockSizes() []int {
+	// Analyze the distribution of block sizes
+	// This is a placeholder implementation
+	return []int{1024, 2048, 4096, 8192} // Common block sizes
+}
+
+func (zbs *ZFSBlockstore) calculateOptimalRecordSize(sizes []int) string {
+	// Calculate optimal ZFS record size based on block size distribution
+	// This is a simplified implementation
+	avgSize := 0
+	for _, size := range sizes {
+		avgSize += size
+	}
+	avgSize /= len(sizes)
+	
+	if avgSize < 32*1024 {
+		return "32K"
+	} else if avgSize < 128*1024 {
+		return "128K"
+	} else {
+		return "1M"
+	}
+}

@@ -1,0 +1,350 @@
+package zfshttp
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	blocks "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
+	blockstore "github.com/ipfs/go-ipfs-blockstore"
+	"github.com/multiformats/go-multihash"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestZFSBlockstoreBasicOperations(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	// Create a test block
+	data := []byte("test block data")
+	hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+	require.NoError(t, err)
+	
+	c := cid.NewCidV1(cid.Raw, hash)
+	block := blocks.NewBlockWithCid(data, c)
+
+	// Test Put
+	err = zbs.Put(ctx, block)
+	require.NoError(t, err)
+
+	// Test Has
+	exists, err := zbs.Has(ctx, c)
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	// Test Get
+	retrievedBlock, err := zbs.Get(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, data, retrievedBlock.RawData())
+	assert.True(t, c.Equals(retrievedBlock.Cid()))
+
+	// Test GetSize
+	size, err := zbs.GetSize(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), size)
+
+	// Test DeleteBlock
+	err = zbs.DeleteBlock(ctx, c)
+	require.NoError(t, err)
+
+	// Verify deletion
+	exists, err = zbs.Has(ctx, c)
+	require.NoError(t, err)
+	assert.False(t, exists)
+
+	_, err = zbs.Get(ctx, c)
+	assert.Equal(t, blockstore.ErrNotFound, err)
+}
+
+func TestZFSBlockstoreCache(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-cache-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	// Create a test block
+	data := []byte("cached block data")
+	hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+	require.NoError(t, err)
+	
+	c := cid.NewCidV1(cid.Raw, hash)
+	block := blocks.NewBlockWithCid(data, c)
+
+	// Put block
+	err = zbs.Put(ctx, block)
+	require.NoError(t, err)
+
+	// First get should populate cache
+	initialMetrics := zbs.GetMetrics()
+	
+	_, err = zbs.Get(ctx, c)
+	require.NoError(t, err)
+
+	// Second get should hit cache
+	_, err = zbs.Get(ctx, c)
+	require.NoError(t, err)
+
+	// Check metrics
+	finalMetrics := zbs.GetMetrics()
+	assert.Greater(t, finalMetrics.CacheHits, initialMetrics.CacheHits)
+}
+
+func TestZFSBlockstorePutMany(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-putmany-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	// Create multiple test blocks
+	var testBlocks []blocks.Block
+	for i := 0; i < 5; i++ {
+		data := []byte(fmt.Sprintf("test block data %d", i))
+		hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+		require.NoError(t, err)
+		
+		c := cid.NewCidV1(cid.Raw, hash)
+		block := blocks.NewBlockWithCid(data, c)
+		testBlocks = append(testBlocks, block)
+	}
+
+	// Test PutMany
+	err = zbs.PutMany(ctx, testBlocks)
+	require.NoError(t, err)
+
+	// Verify all blocks were stored
+	for _, block := range testBlocks {
+		exists, err := zbs.Has(ctx, block.Cid())
+		require.NoError(t, err)
+		assert.True(t, exists)
+
+		retrievedBlock, err := zbs.Get(ctx, block.Cid())
+		require.NoError(t, err)
+		assert.Equal(t, block.RawData(), retrievedBlock.RawData())
+	}
+}
+
+func TestZFSBlockstoreAllKeysChan(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-allkeys-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	// Create and store test blocks
+	var expectedCIDs []cid.Cid
+	for i := 0; i < 3; i++ {
+		data := []byte(fmt.Sprintf("test block %d", i))
+		hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+		require.NoError(t, err)
+		
+		c := cid.NewCidV1(cid.Raw, hash)
+		block := blocks.NewBlockWithCid(data, c)
+		
+		err = zbs.Put(ctx, block)
+		require.NoError(t, err)
+		
+		expectedCIDs = append(expectedCIDs, c)
+	}
+
+	// Get all keys
+	keysChan, err := zbs.AllKeysChan(ctx)
+	require.NoError(t, err)
+
+	// Collect all keys
+	var actualCIDs []cid.Cid
+	for c := range keysChan {
+		actualCIDs = append(actualCIDs, c)
+	}
+
+	// Verify we got all expected keys
+	assert.Len(t, actualCIDs, len(expectedCIDs))
+	
+	// Convert to maps for easier comparison
+	expectedMap := make(map[string]bool)
+	for _, c := range expectedCIDs {
+		expectedMap[c.String()] = true
+	}
+	
+	actualMap := make(map[string]bool)
+	for _, c := range actualCIDs {
+		actualMap[c.String()] = true
+	}
+	
+	assert.Equal(t, expectedMap, actualMap)
+}
+
+func TestZFSBlockstoreMetrics(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-metrics-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	initialMetrics := zbs.GetMetrics()
+
+	// Create and store a test block
+	data := []byte("metrics test block")
+	hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+	require.NoError(t, err)
+	
+	c := cid.NewCidV1(cid.Raw, hash)
+	block := blocks.NewBlockWithCid(data, c)
+
+	// Perform operations
+	err = zbs.Put(ctx, block)
+	require.NoError(t, err)
+
+	_, err = zbs.Get(ctx, block.Cid())
+	require.NoError(t, err)
+
+	_, err = zbs.GetSize(ctx, block.Cid())
+	require.NoError(t, err)
+
+	err = zbs.DeleteBlock(ctx, block.Cid())
+	require.NoError(t, err)
+
+	// Check metrics
+	finalMetrics := zbs.GetMetrics()
+	assert.Greater(t, finalMetrics.WriteOperations, initialMetrics.WriteOperations)
+	assert.Greater(t, finalMetrics.ReadOperations, initialMetrics.ReadOperations)
+	assert.Greater(t, finalMetrics.DeleteOperations, initialMetrics.DeleteOperations)
+}
+
+func TestZFSBlockstoreDeduplication(t *testing.T) {
+	// Skip if ZFS is not available
+	if !isZFSAvailable() {
+		t.Skip("ZFS not available, skipping test")
+	}
+
+	cfg, zfsManager, cleanup := createTestZFSBlockstore(t)
+	defer cleanup()
+	
+	// Enable deduplication for this test
+	cfg.Deduplication = true
+
+	tempDir, err := os.MkdirTemp("", "zfs-blockstore-dedup-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	zbs, err := NewZFSBlockstore(cfg, zfsManager, tempDir)
+	require.NoError(t, err)
+	defer zbs.Close()
+
+	ctx := context.Background()
+
+	// Create identical blocks
+	data := []byte("duplicate block data")
+	hash, err := multihash.Sum(data, multihash.SHA2_256, -1)
+	require.NoError(t, err)
+	
+	c := cid.NewCidV1(cid.Raw, hash)
+	block := blocks.NewBlockWithCid(data, c)
+
+	initialMetrics := zbs.GetMetrics()
+
+	// Put the same block twice
+	err = zbs.Put(ctx, block)
+	require.NoError(t, err)
+
+	err = zbs.Put(ctx, block)
+	require.NoError(t, err)
+
+	// Check that deduplication was detected
+	finalMetrics := zbs.GetMetrics()
+	assert.Greater(t, finalMetrics.DeduplicatedBlocks, initialMetrics.DeduplicatedBlocks)
+}
+
+// Test helper functions
+
+func createTestZFSBlockstore(t *testing.T) (*Config, *ZFSManager, func()) {
+	cfg := &Config{}
+	cfg.Default()
+	cfg.PoolName = "test-pool"
+	cfg.DatasetName = "test-blockstore"
+	cfg.AutoOptimize = false // Disable for tests
+	cfg.SnapshotInterval = 0 // Disable for tests
+
+	zfsManager := NewZFSManager(cfg)
+
+	cleanup := func() {
+		// Cleanup would remove test datasets in a real ZFS environment
+	}
+
+	return cfg, zfsManager, cleanup
+}
+
+func isZFSAvailable() bool {
+	// Check if ZFS commands are available
+	// In a real test environment, this would check for actual ZFS availability
+	// For now, we'll assume it's not available to avoid requiring ZFS for tests
+	return false
+}

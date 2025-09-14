@@ -1,0 +1,189 @@
+package zfshttp
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/ipfs-cluster/ipfs-cluster/api"
+
+	cid "github.com/ipfs/go-cid"
+	peer "github.com/libp2p/go-libp2p/core/peer"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// MockZFSConnector implements a mock ZFS connector for testing
+type MockZFSConnector struct {
+	*MockDatasetManager
+	metrics *ZFSMetrics
+	config  *Config
+}
+
+func NewMockZFSConnector() *MockZFSConnector {
+	config := &Config{}
+	config.Default()
+	
+	return &MockZFSConnector{
+		MockDatasetManager: NewMockDatasetManager(),
+		metrics: &ZFSMetrics{
+			CompressionRatio:   1.5,
+			DeduplicationRatio: 2.0,
+			ARCHitRatio:       95.0,
+			FragmentationLevel: 10.0,
+			LastUpdated:       time.Now(),
+		},
+		config: config,
+	}
+}
+
+func (m *MockZFSConnector) GetZFSMetrics() *ZFSMetrics {
+	return m.metrics
+}
+
+func (m *MockZFSConnector) Pin(ctx context.Context, pin api.Pin) error {
+	m.UpdatePinCount("test-dataset", 1)
+	return nil
+}
+
+func (m *MockZFSConnector) Unpin(ctx context.Context, c api.Cid) error {
+	m.UpdatePinCount("test-dataset", -1)
+	return nil
+}
+
+func (m *MockZFSConnector) PinLsCid(ctx context.Context, pin api.Pin) (api.IPFSPinStatus, error) {
+	return api.IPFSPinStatusRecursive, nil
+}
+
+func (m *MockZFSConnector) PinLs(ctx context.Context, typeFilters []string, out chan<- api.IPFSPinInfo) error {
+	defer close(out)
+	
+	// Send mock pin info
+	testCid, _ := cid.Decode("QmTest123")
+	pinInfo := api.IPFSPinInfo{
+		Cid:  api.Cid{Cid: testCid},
+		Type: api.IPFSPinStatusRecursive,
+	}
+	
+	select {
+	case out <- pinInfo:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	
+	return nil
+}
+
+// Implement other required methods with mock behavior
+func (m *MockZFSConnector) ID(ctx context.Context) (api.IPFSID, error) {
+	return api.IPFSID{ID: peer.ID("mock-ipfs-id")}, nil
+}
+
+func (m *MockZFSConnector) ConfigKey(keypath string) (interface{}, error) {
+	return "mock-config-value", nil
+}
+
+func (m *MockZFSConnector) RepoStat(ctx context.Context) (api.IPFSRepoStat, error) {
+	return api.IPFSRepoStat{
+		RepoSize:   1024 * 1024 * 1024, // 1GB
+		StorageMax: 10 * 1024 * 1024 * 1024, // 10GB
+	}, nil
+}
+
+func (m *MockZFSConnector) SwarmPeers(ctx context.Context) ([]peer.ID, error) {
+	return []peer.ID{}, nil
+}
+
+func (m *MockZFSConnector) ConnectSwarms(ctx context.Context) error {
+	return nil
+}
+
+func (m *MockZFSConnector) BlockStream(ctx context.Context, in <-chan api.NodeWithMeta) error {
+	// Consume all blocks from the channel
+	for range in {
+		// Mock processing
+	}
+	return nil
+}
+
+func (m *MockZFSConnector) BlockGet(ctx context.Context, c api.Cid) ([]byte, error) {
+	return []byte("mock-block-data"), nil
+}
+
+func (m *MockZFSConnector) Resolve(ctx context.Context, path string) (api.Cid, error) {
+	testCid, _ := cid.Decode("QmTest123")
+	return api.Cid{Cid: testCid}, nil
+}
+
+func (m *MockZFSConnector) RepoGC(ctx context.Context) (api.RepoGC, error) {
+	return api.RepoGC{
+		Keys: []api.IPFSRepoGC{},
+	}, nil
+}
+
+func TestMockZFSConnector_Pin(t *testing.T) {
+	mockConnector := NewMockZFSConnector()
+	
+	testCid, err := cid.Decode("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG")
+	require.NoError(t, err)
+	
+	pin := api.Pin{
+		Cid: api.Cid{Cid: testCid},
+	}
+	
+	err = mockConnector.Pin(context.Background(), pin)
+	assert.NoError(t, err)
+	
+	// Verify pin count was updated
+	assert.Equal(t, int64(1), mockConnector.pinCount)
+}
+
+func TestMockZFSConnector_Unpin(t *testing.T) {
+	mockConnector := NewMockZFSConnector()
+	mockConnector.pinCount = 1 // Start with 1 pin
+	
+	testCid, err := cid.Decode("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG")
+	require.NoError(t, err)
+	
+	err = mockConnector.Unpin(context.Background(), api.Cid{Cid: testCid})
+	assert.NoError(t, err)
+	
+	// Verify pin count was decremented
+	assert.Equal(t, int64(0), mockConnector.pinCount)
+}
+
+func TestMockZFSConnector_GetZFSMetrics(t *testing.T) {
+	mockConnector := NewMockZFSConnector()
+	
+	metrics := mockConnector.GetZFSMetrics()
+	require.NotNil(t, metrics)
+	
+	assert.Equal(t, 1.5, metrics.CompressionRatio)
+	assert.Equal(t, 2.0, metrics.DeduplicationRatio)
+	assert.Equal(t, 95.0, metrics.ARCHitRatio)
+	assert.Equal(t, 10.0, metrics.FragmentationLevel)
+}
+
+func TestMockZFSConnector_BasicOperations(t *testing.T) {
+	mockConnector := NewMockZFSConnector()
+	
+	// Test snapshot operations
+	err := mockConnector.CreateSnapshot("test-dataset", "test-snapshot")
+	assert.NoError(t, err)
+	
+	snapshots, err := mockConnector.ListSnapshots("test-dataset")
+	assert.NoError(t, err)
+	assert.Len(t, snapshots, 2)
+	
+	err = mockConnector.RollbackToSnapshot("test-dataset", "test-snapshot")
+	assert.NoError(t, err)
+	
+	// Test other operations
+	id, err := mockConnector.ID(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, peer.ID("mock-ipfs-id"), id.ID)
+	
+	configValue, err := mockConnector.ConfigKey("test.key")
+	assert.NoError(t, err)
+	assert.Equal(t, "mock-config-value", configValue)
+}

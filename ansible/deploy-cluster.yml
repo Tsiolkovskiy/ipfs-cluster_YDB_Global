@@ -1,0 +1,101 @@
+---
+- name: Deploy IPFS Cluster ZFS Integration
+  hosts: cluster_nodes
+  become: yes
+  vars:
+    zfs_version: "2.1.0"
+    go_version: "1.19.5"
+    ipfs_version: "0.17.0"
+    cluster_secret: "{{ vault_cluster_secret }}"
+    
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+      
+    - name: Install ZFS utilities
+      apt:
+        name:
+          - zfsutils-linux
+          - zfs-dkms
+        state: present
+      when: ansible_os_family == "Debian"
+      
+    - name: Install Go
+      unarchive:
+        src: "https://golang.org/dl/go{{ go_version }}.linux-amd64.tar.gz"
+        dest: /usr/local
+        remote_src: yes
+        creates: /usr/local/go/bin/go
+        
+    - name: Add Go to PATH
+      lineinfile:
+        path: /etc/environment
+        line: 'PATH="/usr/local/go/bin:$PATH"'
+        
+    - name: Install IPFS
+      get_url:
+        url: "https://github.com/ipfs/kubo/releases/download/v{{ ipfs_version }}/kubo_v{{ ipfs_version }}_linux-amd64.tar.gz"
+        dest: /tmp/ipfs.tar.gz
+        
+    - name: Extract IPFS
+      unarchive:
+        src: /tmp/ipfs.tar.gz
+        dest: /tmp
+        remote_src: yes
+        
+    - name: Install IPFS binary
+      copy:
+        src: /tmp/kubo/ipfs
+        dest: /usr/local/bin/ipfs
+        mode: '0755'
+        remote_src: yes
+        
+    - name: Create IPFS user
+      user:
+        name: ipfs
+        system: yes
+        shell: /bin/bash
+        home: /var/lib/ipfs
+        
+    - name: Initialize IPFS
+      become_user: ipfs
+      command: ipfs init
+      args:
+        creates: /var/lib/ipfs/.ipfs
+        
+    - name: Configure ZFS pools
+      include_tasks: tasks/configure-zfs.yml
+      
+    - name: Build IPFS Cluster
+      include_tasks: tasks/build-cluster.yml
+      
+    - name: Configure IPFS Cluster
+      template:
+        src: templates/service.json.j2
+        dest: /var/lib/ipfs-cluster/service.json
+        owner: ipfs
+        group: ipfs
+        mode: '0600'
+        
+    - name: Create systemd services
+      include_tasks: tasks/create-services.yml
+      
+    - name: Start services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - ipfs
+        - ipfs-cluster
+        
+    - name: Wait for cluster to be ready
+      uri:
+        url: "http://localhost:9094/api/v0/id"
+      register: cluster_status
+      until: cluster_status.status == 200
+      retries: 30
+      delay: 10

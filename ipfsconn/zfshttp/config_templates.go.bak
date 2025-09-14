@@ -1,0 +1,445 @@
+package zfshttp
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ConfigTemplate represents different configuration templates for various use cases
+type ConfigTemplate struct {
+	Name        string
+	Description string
+	Config      *KuboConfig
+	ZFSConfig   *Config
+}
+
+// GetConfigTemplates returns predefined configuration templates
+func GetConfigTemplates() map[string]*ConfigTemplate {
+	return map[string]*ConfigTemplate{
+		"high-performance": getHighPerformanceTemplate(),
+		"storage-optimized": getStorageOptimizedTemplate(),
+		"balanced": getBalancedTemplate(),
+		"development": getDevelopmentTemplate(),
+		"cluster-node": getClusterNodeTemplate(),
+	}
+}
+
+// getHighPerformanceTemplate returns a configuration optimized for maximum performance
+func getHighPerformanceTemplate() *ConfigTemplate {
+	zfsConfig := &Config{}
+	zfsConfig.Default()
+	zfsConfig.PoolName = "nvme-pool"
+	zfsConfig.DatasetName = "ipfs-cluster/high-perf"
+	zfsConfig.Compression = "lz4"        // Fast compression
+	zfsConfig.RecordSize = "1M"          // Large record size for throughput
+	zfsConfig.Deduplication = false      // Disabled for performance
+	zfsConfig.Sync = "disabled"          // Disabled for maximum performance
+	zfsConfig.ATime = false              // Disabled for performance
+	zfsConfig.MaxPinsPerShard = 10000000 // Smaller shards for better performance
+	zfsConfig.AutoOptimize = true
+	zfsConfig.SnapshotInterval = 0       // Disabled for performance
+
+	kuboConfig, _ := NewOptimizedKuboConfig("/data/ipfs", zfsConfig)
+	
+	// Performance optimizations
+	kuboConfig.Datastore.StorageMax = "1TB"
+	kuboConfig.Datastore.StorageGCWatermark = 95 // Higher watermark
+	kuboConfig.Datastore.GCPeriod = "30m"        // More frequent GC
+	kuboConfig.Datastore.BloomFilterSize = 4194304 // Larger bloom filter
+	
+	kuboConfig.Swarm.ConnMgr.LowWater = 1000
+	kuboConfig.Swarm.ConnMgr.HighWater = 1500
+	kuboConfig.Swarm.DisableBandwidthMetrics = true // Disable for performance
+	
+	kuboConfig.Reprovider.Interval = "6h" // More frequent reproviding
+
+	return &ConfigTemplate{
+		Name:        "high-performance",
+		Description: "Optimized for maximum performance with NVMe storage",
+		Config:      kuboConfig,
+		ZFSConfig:   zfsConfig,
+	}
+}
+
+// getStorageOptimizedTemplate returns a configuration optimized for storage efficiency
+func getStorageOptimizedTemplate() *ConfigTemplate {
+	zfsConfig := &Config{}
+	zfsConfig.Default()
+	zfsConfig.PoolName = "storage-pool"
+	zfsConfig.DatasetName = "ipfs-cluster/storage-opt"
+	zfsConfig.Compression = "zstd"         // Maximum compression
+	zfsConfig.RecordSize = "128K"          // Balanced record size
+	zfsConfig.Deduplication = true         // Enabled for space savings
+	zfsConfig.Sync = "standard"            // Standard sync
+	zfsConfig.ATime = false                // Disabled to save space
+	zfsConfig.MaxPinsPerShard = 5000000000 // Larger shards for efficiency
+	zfsConfig.AutoOptimize = true
+	zfsConfig.SnapshotInterval = 7200      // 2 hours
+
+	kuboConfig, _ := NewOptimizedKuboConfig("/data/ipfs", zfsConfig)
+	
+	// Storage optimizations
+	kuboConfig.Datastore.StorageMax = "10TB"
+	kuboConfig.Datastore.StorageGCWatermark = 80 // Lower watermark for space
+	kuboConfig.Datastore.GCPeriod = "4h"         // Less frequent GC
+	kuboConfig.Datastore.BloomFilterSize = 8388608 // Larger bloom filter for dedup
+	
+	kuboConfig.Swarm.ConnMgr.LowWater = 200
+	kuboConfig.Swarm.ConnMgr.HighWater = 400
+	
+	kuboConfig.Reprovider.Interval = "24h" // Less frequent reproviding
+
+	return &ConfigTemplate{
+		Name:        "storage-optimized",
+		Description: "Optimized for maximum storage efficiency and compression",
+		Config:      kuboConfig,
+		ZFSConfig:   zfsConfig,
+	}
+}
+
+// getBalancedTemplate returns a balanced configuration
+func getBalancedTemplate() *ConfigTemplate {
+	zfsConfig := &Config{}
+	zfsConfig.Default()
+	// Uses default values which are already balanced
+
+	kuboConfig, _ := NewOptimizedKuboConfig("/data/ipfs", zfsConfig)
+
+	return &ConfigTemplate{
+		Name:        "balanced",
+		Description: "Balanced configuration for general use",
+		Config:      kuboConfig,
+		ZFSConfig:   zfsConfig,
+	}
+}
+
+// getDevelopmentTemplate returns a configuration optimized for development
+func getDevelopmentTemplate() *ConfigTemplate {
+	zfsConfig := &Config{}
+	zfsConfig.Default()
+	zfsConfig.PoolName = "dev-pool"
+	zfsConfig.DatasetName = "ipfs-cluster/dev"
+	zfsConfig.Compression = "lz4"          // Fast compression
+	zfsConfig.RecordSize = "128K"          // Standard record size
+	zfsConfig.Deduplication = false        // Disabled for simplicity
+	zfsConfig.Sync = "disabled"            // Disabled for development speed
+	zfsConfig.ATime = false                // Disabled
+	zfsConfig.MaxPinsPerShard = 1000000    // Smaller shards for testing
+	zfsConfig.AutoOptimize = false         // Disabled for predictability
+	zfsConfig.SnapshotInterval = 0         // Disabled for development
+
+	kuboConfig, _ := NewOptimizedKuboConfig("/tmp/ipfs-dev", zfsConfig)
+	
+	// Development optimizations
+	kuboConfig.Datastore.StorageMax = "10GB"
+	kuboConfig.Datastore.StorageGCWatermark = 90
+	kuboConfig.Datastore.GCPeriod = "10m"        // Frequent GC for testing
+	kuboConfig.Datastore.BloomFilterSize = 262144 // Smaller bloom filter
+	
+	kuboConfig.Swarm.ConnMgr.LowWater = 50
+	kuboConfig.Swarm.ConnMgr.HighWater = 100
+	
+	kuboConfig.Discovery.MDNS.Enabled = true // Enable for local discovery
+	kuboConfig.Gateway.Writable = true       // Enable for testing
+
+	return &ConfigTemplate{
+		Name:        "development",
+		Description: "Optimized for development and testing",
+		Config:      kuboConfig,
+		ZFSConfig:   zfsConfig,
+	}
+}
+
+// getClusterNodeTemplate returns a configuration optimized for cluster nodes
+func getClusterNodeTemplate() *ConfigTemplate {
+	zfsConfig := &Config{}
+	zfsConfig.Default()
+	zfsConfig.PoolName = "cluster-pool"
+	zfsConfig.DatasetName = "ipfs-cluster/node"
+	zfsConfig.Compression = "lz4"            // Fast compression for cluster
+	zfsConfig.RecordSize = "256K"            // Optimized for cluster workloads
+	zfsConfig.Deduplication = true           // Enabled for cluster efficiency
+	zfsConfig.Sync = "standard"              // Standard sync for reliability
+	zfsConfig.ATime = false                  // Disabled for performance
+	zfsConfig.MaxPinsPerShard = 2000000000   // Large shards for cluster scale
+	zfsConfig.AutoOptimize = true
+	zfsConfig.SnapshotInterval = 3600        // 1 hour snapshots
+
+	kuboConfig, _ := NewOptimizedKuboConfig("/cluster/ipfs", zfsConfig)
+	
+	// Cluster optimizations
+	kuboConfig.Datastore.StorageMax = "5TB"
+	kuboConfig.Datastore.StorageGCWatermark = 85
+	kuboConfig.Datastore.GCPeriod = "2h"
+	kuboConfig.Datastore.BloomFilterSize = 2097152
+	
+	kuboConfig.Swarm.ConnMgr.LowWater = 800
+	kuboConfig.Swarm.ConnMgr.HighWater = 1200
+	kuboConfig.Swarm.EnableAutoRelay = false    // Disabled for cluster nodes
+	kuboConfig.Swarm.EnableRelayHop = false     // Disabled for cluster nodes
+	
+	kuboConfig.Routing.Type = "dhtclient"       // DHT client mode
+	kuboConfig.Reprovider.Interval = "12h"      // Cluster-optimized interval
+	kuboConfig.Gateway.Writable = false         // Disabled for security
+
+	return &ConfigTemplate{
+		Name:        "cluster-node",
+		Description: "Optimized for IPFS Cluster node deployment",
+		Config:      kuboConfig,
+		ZFSConfig:   zfsConfig,
+	}
+}
+
+// GenerateConfigFromTemplate generates a configuration from a template with customizations
+func GenerateConfigFromTemplate(templateName string, customizations map[string]interface{}) (*ConfigTemplate, error) {
+	templates := GetConfigTemplates()
+	
+	template, exists := templates[templateName]
+	if !exists {
+		return nil, fmt.Errorf("template %s not found", templateName)
+	}
+	
+	// Create a copy of the template
+	newTemplate := &ConfigTemplate{
+		Name:        template.Name,
+		Description: template.Description,
+		Config:      copyKuboConfig(template.Config),
+		ZFSConfig:   copyZFSConfig(template.ZFSConfig),
+	}
+	
+	// Apply customizations
+	if err := applyCustomizations(newTemplate, customizations); err != nil {
+		return nil, fmt.Errorf("applying customizations: %w", err)
+	}
+	
+	return newTemplate, nil
+}
+
+// copyKuboConfig creates a deep copy of KuboConfig
+func copyKuboConfig(original *KuboConfig) *KuboConfig {
+	// This is a simplified copy - in production, use a proper deep copy library
+	copy := *original
+	return &copy
+}
+
+// copyZFSConfig creates a deep copy of ZFS Config
+func copyZFSConfig(original *Config) *Config {
+	copy := *original
+	return &copy
+}
+
+// applyCustomizations applies customizations to a configuration template
+func applyCustomizations(template *ConfigTemplate, customizations map[string]interface{}) error {
+	for key, value := range customizations {
+		if err := applyCustomization(template, key, value); err != nil {
+			return fmt.Errorf("applying customization %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// applyCustomization applies a single customization
+func applyCustomization(template *ConfigTemplate, key string, value interface{}) error {
+	parts := strings.Split(key, ".")
+	
+	switch parts[0] {
+	case "zfs":
+		return applyZFSCustomization(template.ZFSConfig, parts[1:], value)
+	case "kubo":
+		return applyKuboCustomization(template.Config, parts[1:], value)
+	default:
+		return fmt.Errorf("unknown customization category: %s", parts[0])
+	}
+}
+
+// applyZFSCustomization applies ZFS-specific customizations
+func applyZFSCustomization(config *Config, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty customization path")
+	}
+	
+	switch path[0] {
+	case "pool_name":
+		if str, ok := value.(string); ok {
+			config.PoolName = str
+		} else {
+			return fmt.Errorf("pool_name must be a string")
+		}
+	case "compression":
+		if str, ok := value.(string); ok {
+			config.Compression = str
+		} else {
+			return fmt.Errorf("compression must be a string")
+		}
+	case "recordsize":
+		if str, ok := value.(string); ok {
+			config.RecordSize = str
+		} else {
+			return fmt.Errorf("recordsize must be a string")
+		}
+	case "deduplication":
+		if b, ok := value.(bool); ok {
+			config.Deduplication = b
+		} else {
+			return fmt.Errorf("deduplication must be a boolean")
+		}
+	case "max_pins_per_shard":
+		if i, ok := value.(int64); ok {
+			config.MaxPinsPerShard = i
+		} else if f, ok := value.(float64); ok {
+			config.MaxPinsPerShard = int64(f)
+		} else {
+			return fmt.Errorf("max_pins_per_shard must be a number")
+		}
+	default:
+		return fmt.Errorf("unknown ZFS customization: %s", path[0])
+	}
+	
+	return nil
+}
+
+// applyKuboCustomization applies Kubo-specific customizations
+func applyKuboCustomization(config *KuboConfig, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty customization path")
+	}
+	
+	switch path[0] {
+	case "datastore":
+		return applyDatastoreCustomization(&config.Datastore, path[1:], value)
+	case "swarm":
+		return applySwarmCustomization(&config.Swarm, path[1:], value)
+	case "reprovider":
+		return applyReproviderCustomization(&config.Reprovider, path[1:], value)
+	default:
+		return fmt.Errorf("unknown Kubo customization: %s", path[0])
+	}
+}
+
+// applyDatastoreCustomization applies datastore customizations
+func applyDatastoreCustomization(config *DatastoreConfig, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty datastore customization path")
+	}
+	
+	switch path[0] {
+	case "storage_max":
+		if str, ok := value.(string); ok {
+			config.StorageMax = str
+		} else {
+			return fmt.Errorf("storage_max must be a string")
+		}
+	case "gc_watermark":
+		if i, ok := value.(int); ok {
+			config.StorageGCWatermark = i
+		} else if f, ok := value.(float64); ok {
+			config.StorageGCWatermark = int(f)
+		} else {
+			return fmt.Errorf("gc_watermark must be a number")
+		}
+	case "gc_period":
+		if str, ok := value.(string); ok {
+			config.GCPeriod = str
+		} else {
+			return fmt.Errorf("gc_period must be a string")
+		}
+	default:
+		return fmt.Errorf("unknown datastore customization: %s", path[0])
+	}
+	
+	return nil
+}
+
+// applySwarmCustomization applies swarm customizations
+func applySwarmCustomization(config *SwarmConfig, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty swarm customization path")
+	}
+	
+	switch path[0] {
+	case "connmgr":
+		return applyConnMgrCustomization(&config.ConnMgr, path[1:], value)
+	default:
+		return fmt.Errorf("unknown swarm customization: %s", path[0])
+	}
+}
+
+// applyConnMgrCustomization applies connection manager customizations
+func applyConnMgrCustomization(config *ConnMgrConfig, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty connmgr customization path")
+	}
+	
+	switch path[0] {
+	case "low_water":
+		if i, ok := value.(int); ok {
+			config.LowWater = i
+		} else if f, ok := value.(float64); ok {
+			config.LowWater = int(f)
+		} else {
+			return fmt.Errorf("low_water must be a number")
+		}
+	case "high_water":
+		if i, ok := value.(int); ok {
+			config.HighWater = i
+		} else if f, ok := value.(float64); ok {
+			config.HighWater = int(f)
+		} else {
+			return fmt.Errorf("high_water must be a number")
+		}
+	default:
+		return fmt.Errorf("unknown connmgr customization: %s", path[0])
+	}
+	
+	return nil
+}
+
+// applyReproviderCustomization applies reprovider customizations
+func applyReproviderCustomization(config *ReproviderConfig, path []string, value interface{}) error {
+	if len(path) == 0 {
+		return fmt.Errorf("empty reprovider customization path")
+	}
+	
+	switch path[0] {
+	case "interval":
+		if str, ok := value.(string); ok {
+			config.Interval = str
+		} else {
+			return fmt.Errorf("interval must be a string")
+		}
+	case "strategy":
+		if str, ok := value.(string); ok {
+			config.Strategy = str
+		} else {
+			return fmt.Errorf("strategy must be a string")
+		}
+	default:
+		return fmt.Errorf("unknown reprovider customization: %s", path[0])
+	}
+	
+	return nil
+}
+
+// ListAvailableTemplates returns a list of available configuration templates
+func ListAvailableTemplates() []string {
+	templates := GetConfigTemplates()
+	names := make([]string, 0, len(templates))
+	
+	for name := range templates {
+		names = append(names, name)
+	}
+	
+	return names
+}
+
+// GetTemplateDescription returns the description of a configuration template
+func GetTemplateDescription(templateName string) (string, error) {
+	templates := GetConfigTemplates()
+	
+	template, exists := templates[templateName]
+	if !exists {
+		return "", fmt.Errorf("template %s not found", templateName)
+	}
+	
+	return template.Description, nil
+}

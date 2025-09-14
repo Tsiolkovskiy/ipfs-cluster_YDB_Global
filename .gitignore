@@ -1,80 +1,45 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-bin/
-dist/
-
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-coverage.html
-
-# Dependency directories (remove the comment below to include it)
+tag_annotation
+coverage.out
+cmd/ipfs-cluster-service/ipfs-cluster-service
+cmd/ipfs-cluster-ctl/ipfs-cluster-ctl
+cmd/ipfs-cluster-follow/ipfs-cluster-follow
+sharness/lib/sharness
+sharness/test-results
+sharness/trash*
 vendor/
 
-# Go workspace file
-go.work
 
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+raftFolderFromTest*
+peerstore
+shardTesting
+compose
 
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+# Compiled Object files, Static and Dynamic libs (Shared Objects)
+*.o
+*.a
+*.so
 
-# Local environment files
-.env
-.env.local
-.env.*.local
+# Folders
+_obj
+_test
+test/sharness/test-results
+test/sharness/trash*
+test/sharness/lib/sharness
+test/sharness/.test_config
+test/sharness/.test_ipfs
 
-# Log files
-*.log
-logs/
+# Architecture specific extensions/prefixes
+*.[568vq]
+[568vq].out
 
-# Docker volumes
-docker-volumes/
+*.cgo1.go
+*.cgo2.c
+_cgo_defun.c
+_cgo_gotypes.go
+_cgo_export.*
 
-# Temporary files
-tmp/
-temp/
+_testmain.go
 
-# Configuration overrides
-configs/local.yaml
-configs/development.yaml
-configs/production.yaml
-
-# Build artifacts
-*.tar.gz
-*.zip
-
-# Test artifacts
-testdata/output/
-
-# Certificates and keys
-*.pem
-*.key
-*.crt
-*.p12
-
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Backup files
-*.bak
-*.backup
+*.exe
+*.test
+*.prof

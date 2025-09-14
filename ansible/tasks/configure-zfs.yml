@@ -1,0 +1,58 @@
+---
+- name: Check if ZFS pools exist
+  command: zpool list {{ item.name }}
+  register: pool_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ zfs_pools }}"
+  
+- name: Create ZFS pools
+  command: >
+    zpool create -f {{ item.item.name }}
+    {% for option in item.item.options %}
+    -o {{ option }}
+    {% endfor %}
+    {% for property in item.item.properties %}
+    -O {{ property }}
+    {% endfor %}
+    {{ item.item.devices | join(' ') }}
+  when: item.rc != 0
+  loop: "{{ pool_check.results }}"
+  
+- name: Create ZFS datasets
+  zfs:
+    name: "{{ item.pool }}/{{ item.name }}"
+    state: present
+    extra_zfs_properties: "{{ item.properties | default({}) }}"
+  loop: "{{ zfs_datasets }}"
+  
+- name: Set ZFS properties for optimization
+  zfs:
+    name: "{{ item.name }}"
+    state: present
+    extra_zfs_properties:
+      compression: "{{ item.compression | default('lz4') }}"
+      dedup: "{{ item.dedup | default('on') }}"
+      recordsize: "{{ item.recordsize | default('128K') }}"
+      atime: "{{ item.atime | default('off') }}"
+      sync: "{{ item.sync | default('standard') }}"
+  loop: "{{ zfs_pools }}"
+  
+- name: Create mount points
+  file:
+    path: "{{ item.mountpoint }}"
+    state: directory
+    owner: ipfs
+    group: ipfs
+    mode: '0755'
+  loop: "{{ zfs_datasets }}"
+  when: item.mountpoint is defined
+  
+- name: Set ZFS quotas
+  zfs:
+    name: "{{ item.pool }}/{{ item.name }}"
+    state: present
+    extra_zfs_properties:
+      quota: "{{ item.quota }}"
+  loop: "{{ zfs_datasets }}"
+  when: item.quota is defined

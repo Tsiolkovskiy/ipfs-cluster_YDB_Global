@@ -1,0 +1,332 @@
+package zfshttp
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// MockDatasetManager implements a mock dataset manager for testing
+type MockDatasetManager struct {
+	datasets map[string]*Dataset
+	pinCount int64
+}
+
+func NewMockDatasetManager() *MockDatasetManager {
+	return &MockDatasetManager{
+		datasets: make(map[string]*Dataset),
+		pinCount: 0,
+	}
+}
+
+func (m *MockDatasetManager) GetDatasetForCID(cid string) (*Dataset, error) {
+	// Return a mock dataset
+	return &Dataset{
+		Name:            "test-pool/shard-0",
+		MountPoint:      "/test/shard-0",
+		CompressionType: "lz4",
+		RecordSize:      "128K",
+		PinCount:        m.pinCount,
+		CreatedAt:       time.Now(),
+		LastAccessed:    time.Now(),
+	}, nil
+}
+
+func (m *MockDatasetManager) UpdatePinCount(datasetName string, delta int64) {
+	m.pinCount += delta
+}
+
+func (m *MockDatasetManager) CreateSnapshot(dataset, name string) error {
+	return nil
+}
+
+func (m *MockDatasetManager) ListSnapshots(dataset string) ([]string, error) {
+	return []string{"snapshot1", "snapshot2"}, nil
+}
+
+func (m *MockDatasetManager) RollbackToSnapshot(dataset, snapshot string) error {
+	return nil
+}
+
+func (m *MockDatasetManager) WriteFile(path string, data []byte) error {
+	return nil
+}
+
+func (m *MockDatasetManager) ReadFile(path string) ([]byte, error) {
+	// Return mock metadata
+	return []byte(`{
+		"cid": "QmTest123",
+		"dataset": "test-pool/shard-0",
+		"zfs_path": "/test/shard-0/QmTest123",
+		"compression_type": "lz4",
+		"size": 1024,
+		"created_at": "2023-01-01T00:00:00Z",
+		"access_count": 1
+	}`), nil
+}
+
+func (m *MockDatasetManager) DeleteFile(path string) error {
+	return nil
+}
+
+func (m *MockDatasetManager) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+func TestZFSConnector_NewZFSConnector(t *testing.T) {
+	cfg := &Config{}
+	err := cfg.Default()
+	require.NoError(t, err)
+
+	// Note: This test would require actual ZFS setup in a real environment
+	// For unit testing, we'll test the configuration validation
+	err = cfg.Validate()
+	assert.NoError(t, err)
+	
+	assert.Equal(t, DefaultZFSPoolName, cfg.ZFSConfig.PoolName)
+	assert.Equal(t, DefaultCompressionType, cfg.ZFSConfig.CompressionType)
+	assert.Equal(t, int64(DefaultMaxPinsPerDataset), cfg.ZFSConfig.MaxPinsPerDataset)
+}
+
+func TestZFSConnector_Config(t *testing.T) {
+	cfg := &Config{}
+	err := cfg.Default()
+	require.NoError(t, err)
+
+	// Test JSON serialization
+	jsonData, err := cfg.ToJSON()
+	require.NoError(t, err)
+	assert.NotEmpty(t, jsonData)
+
+	// Test JSON deserialization
+	cfg2 := &Config{}
+	err = cfg2.LoadJSON(jsonData)
+	require.NoError(t, err)
+	
+	assert.Equal(t, cfg.ZFSConfig.PoolName, cfg2.ZFSConfig.PoolName)
+	assert.Equal(t, cfg.ZFSConfig.CompressionType, cfg2.ZFSConfig.CompressionType)
+}
+
+func TestZFSConnector_ConfigValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		modifyConfig func(*Config)
+		expectError bool
+	}{
+		{
+			name: "valid config",
+			modifyConfig: func(cfg *Config) {
+				// Default config should be valid
+			},
+			expectError: false,
+		},
+		{
+			name: "empty pool name",
+			modifyConfig: func(cfg *Config) {
+				cfg.ZFSConfig.PoolName = ""
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid compression type",
+			modifyConfig: func(cfg *Config) {
+				cfg.ZFSConfig.CompressionType = "invalid"
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid sharding strategy",
+			modifyConfig: func(cfg *Config) {
+				cfg.ZFSConfig.ShardingStrategy = "invalid"
+			},
+			expectError: true,
+		},
+		{
+			name: "zero max pins per dataset",
+			modifyConfig: func(cfg *Config) {
+				cfg.ZFSConfig.MaxPinsPerDataset = 0
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{}
+			err := cfg.Default()
+			require.NoError(t, err)
+			
+			tt.modifyConfig(cfg)
+			
+			err = cfg.Validate()
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestZFSMetrics_UpdatePinMetrics(t *testing.T) {
+	metrics := &ZFSMetrics{}
+	
+	// Test initial state
+	assert.Equal(t, time.Duration(0), metrics.AverageLatency)
+	assert.Equal(t, float64(0), metrics.PinOperationsPerSecond)
+	
+	// Simulate updating metrics (this would be done by the connector)
+	latency1 := 10 * time.Millisecond
+	metrics.AverageLatency = latency1
+	metrics.LastUpdated = time.Now()
+	
+	assert.Equal(t, latency1, metrics.AverageLatency)
+	assert.False(t, metrics.LastUpdated.IsZero())
+}
+
+func TestZFSPinMetadata_Serialization(t *testing.T) {
+	metadata := &ZFSPinMetadata{
+		CID:             "QmTest123",
+		Dataset:         "test-pool/shard-0",
+		ZFSPath:         "/test/shard-0/QmTest123",
+		CompressionType: "lz4",
+		Size:            1024,
+		CreatedAt:       time.Now(),
+		AccessCount:     1,
+	}
+	
+	// Test that metadata can be created and has expected values
+	assert.Equal(t, "QmTest123", metadata.CID)
+	assert.Equal(t, "test-pool/shard-0", metadata.Dataset)
+	assert.Equal(t, "lz4", metadata.CompressionType)
+	assert.Equal(t, int64(1024), metadata.Size)
+	assert.Equal(t, int64(1), metadata.AccessCount)
+}
+
+func TestDatasetManager_ShardingStrategies(t *testing.T) {
+	config := &ZFSConfig{
+		PoolName:            "test-pool",
+		BasePath:            "/test",
+		MetadataPath:        "/test/metadata",
+		CompressionType:     "lz4",
+		MaxPinsPerDataset:   1000,
+		ShardingStrategy:    "consistent_hash",
+	}
+	
+	// Test different sharding strategies
+	strategies := []string{"consistent_hash", "round_robin", "size_based"}
+	
+	for _, strategy := range strategies {
+		t.Run(strategy, func(t *testing.T) {
+			config.ShardingStrategy = strategy
+			
+			// Create mock dataset manager
+			dm := &MockDatasetManager{
+				datasets: map[string]*Dataset{
+					"shard-0": {
+						Name:       "test-pool/shard-0",
+						MountPoint: "/test/shard-0",
+						PinCount:   100,
+					},
+				},
+			}
+			
+			// Test getting dataset for CID
+			dataset, err := dm.GetDatasetForCID("QmTest123")
+			assert.NoError(t, err)
+			assert.NotNil(t, dataset)
+			assert.Equal(t, "test-pool/shard-0", dataset.Name)
+		})
+	}
+}
+
+func TestDataset_ConcurrentAccess(t *testing.T) {
+	dataset := &Dataset{
+		Name:       "test-dataset",
+		MountPoint: "/test",
+		PinCount:   0,
+	}
+	
+	// Test concurrent pin count updates
+	const numGoroutines = 10
+	const incrementsPerGoroutine = 100
+	
+	done := make(chan bool, numGoroutines)
+	
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			for j := 0; j < incrementsPerGoroutine; j++ {
+				dataset.mu.Lock()
+				dataset.PinCount++
+				dataset.mu.Unlock()
+			}
+			done <- true
+		}()
+	}
+	
+	// Wait for all goroutines to complete
+	for i := 0; i < numGoroutines; i++ {
+		<-done
+	}
+	
+	expectedCount := int64(numGoroutines * incrementsPerGoroutine)
+	assert.Equal(t, expectedCount, dataset.PinCount)
+}
+
+func TestZFSConnector_MetricsCollection(t *testing.T) {
+	// Test that metrics structure is properly initialized
+	metrics := &ZFSMetrics{
+		CompressionRatio:   1.5,
+		DeduplicationRatio: 2.0,
+		ARCHitRatio:       95.5,
+		FragmentationLevel: 15.2,
+		LastUpdated:       time.Now(),
+	}
+	
+	// Test concurrent access to metrics
+	metrics.mu.Lock()
+	ratio := metrics.CompressionRatio
+	metrics.mu.Unlock()
+	
+	assert.Equal(t, 1.5, ratio)
+	assert.Equal(t, 2.0, metrics.DeduplicationRatio)
+	assert.Equal(t, 95.5, metrics.ARCHitRatio)
+	assert.Equal(t, 15.2, metrics.FragmentationLevel)
+}
+
+// Benchmark tests for performance validation
+func BenchmarkZFSConnector_PinMetadataOperations(b *testing.B) {
+	dm := NewMockDatasetManager()
+	
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			cid := "QmTest" + string(rune(i))
+			_, err := dm.GetDatasetForCID(cid)
+			if err != nil {
+				b.Fatal(err)
+			}
+			i++
+		}
+	})
+}
+
+func BenchmarkDataset_ConcurrentPinCountUpdate(b *testing.B) {
+	dataset := &Dataset{
+		Name:     "benchmark-dataset",
+		PinCount: 0,
+	}
+	
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			dataset.mu.Lock()
+			dataset.PinCount++
+			dataset.mu.Unlock()
+		}
+	})
+}

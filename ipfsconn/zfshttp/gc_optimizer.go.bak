@@ -1,0 +1,434 @@
+package zfshttp
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/pkg/errors"
+)
+
+// GCOptimizer handles garbage collection optimization for ZFS-backed IPFS
+type GCOptimizer struct {
+	config     *Config
+	zfsManager *ZFSManager
+	
+	// GC statistics
+	lastGCTime     time.Time
+	gcCount        int64
+	totalReclaimed int64
+	
+	// ZFS snapshot integration
+	preGCSnapshot  string
+	postGCSnapshot string
+}
+
+// NewGCOptimizer creates a new garbage collection optimizer
+func NewGCOptimizer(cfg *Config, zfsManager *ZFSManager) *GCOptimizer {
+	return &GCOptimizer{
+		config:     cfg,
+		zfsManager: zfsManager,
+	}
+}
+
+// OptimizeGarbageCollection performs ZFS-aware garbage collection
+func (gco *GCOptimizer) OptimizeGarbageCollection(ctx context.Context, repoPath string) error {
+	// Create pre-GC snapshot for rollback capability
+	if err := gco.createPreGCSnapshot(); err != nil {
+		return errors.Wrap(err, "creating pre-GC snapshot")
+	}
+	
+	// Get initial space usage
+	initialUsage, err := gco.getSpaceUsage()
+	if err != nil {
+		return errors.Wrap(err, "getting initial space usage")
+	}
+	
+	// Perform garbage collection with ZFS optimizations
+	reclaimedSpace, err := gco.performOptimizedGC(ctx, repoPath)
+	if err != nil {
+		// Rollback to pre-GC snapshot on error
+		if rollbackErr := gco.rollbackToPreGCSnapshot(); rollbackErr != nil {
+			return errors.Wrapf(err, "GC failed and rollback failed: %v", rollbackErr)
+		}
+		return errors.Wrap(err, "garbage collection failed")
+	}
+	
+	// Create post-GC snapshot
+	if err := gco.createPostGCSnapshot(); err != nil {
+		// Log error but don't fail the GC operation
+		// In production, this should be logged properly
+	}
+	
+	// Update statistics
+	gco.updateGCStatistics(reclaimedSpace)
+	
+	// Optimize ZFS after GC
+	if err := gco.optimizeZFSAfterGC(); err != nil {
+		// Log error but don't fail the GC operation
+		// In production, this should be logged properly
+	}
+	
+	// Clean up old snapshots
+	if err := gco.cleanupOldGCSnapshots(); err != nil {
+		// Log error but don't fail the GC operation
+	}
+	
+	finalUsage, _ := gco.getSpaceUsage()
+	
+	// Log GC results (in production, use proper logging)
+	fmt.Printf("GC completed: reclaimed %d bytes, space usage: %d -> %d\n", 
+		reclaimedSpace, initialUsage, finalUsage)
+	
+	return nil
+}
+
+// performOptimizedGC performs garbage collection with ZFS-specific optimizations
+func (gco *GCOptimizer) performOptimizedGC(ctx context.Context, repoPath string) (int64, error) {
+	// Set ZFS properties for optimal GC performance
+	datasetPath := gco.config.GetDatasetPath()
+	
+	// Temporarily adjust ZFS settings for GC
+	originalSync, err := gco.zfsManager.GetProperty(datasetPath, "sync")
+	if err != nil {
+		originalSync = "standard" // Default fallback
+	}
+	
+	// Disable sync during GC for better performance
+	if err := gco.zfsManager.SetProperty(datasetPath, "sync", "disabled"); err != nil {
+		return 0, errors.Wrap(err, "setting sync=disabled for GC")
+	}
+	
+	// Ensure sync is restored after GC
+	defer func() {
+		gco.zfsManager.SetProperty(datasetPath, "sync", originalSync)
+	}()
+	
+	// Get space before GC
+	spaceBefore, err := gco.getSpaceUsage()
+	if err != nil {
+		return 0, errors.Wrap(err, "getting space before GC")
+	}
+	
+	// Run IPFS garbage collection
+	cmd := exec.CommandContext(ctx, "ipfs", "repo", "gc")
+	cmd.Env = append(cmd.Env, fmt.Sprintf("IPFS_PATH=%s", repoPath))
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, errors.Wrapf(err, "running ipfs repo gc: %s", string(output))
+	}
+	
+	// Get space after GC
+	spaceAfter, err := gco.getSpaceUsage()
+	if err != nil {
+		return 0, errors.Wrap(err, "getting space after GC")
+	}
+	
+	reclaimedSpace := spaceBefore - spaceAfter
+	if reclaimedSpace < 0 {
+		reclaimedSpace = 0 // Handle edge cases
+	}
+	
+	return reclaimedSpace, nil
+}
+
+// createPreGCSnapshot creates a ZFS snapshot before garbage collection
+func (gco *GCOptimizer) createPreGCSnapshot() error {
+	datasetPath := gco.config.GetDatasetPath()
+	timestamp := time.Now().Unix()
+	snapshotName := fmt.Sprintf("pre-gc-%d", timestamp)
+	
+	if err := gco.zfsManager.CreateSnapshot(datasetPath, snapshotName); err != nil {
+		return errors.Wrapf(err, "creating pre-GC snapshot %s", snapshotName)
+	}
+	
+	gco.preGCSnapshot = fmt.Sprintf("%s@%s", datasetPath, snapshotName)
+	return nil
+}
+
+// createPostGCSnapshot creates a ZFS snapshot after garbage collection
+func (gco *GCOptimizer) createPostGCSnapshot() error {
+	datasetPath := gco.config.GetDatasetPath()
+	timestamp := time.Now().Unix()
+	snapshotName := fmt.Sprintf("post-gc-%d", timestamp)
+	
+	if err := gco.zfsManager.CreateSnapshot(datasetPath, snapshotName); err != nil {
+		return errors.Wrapf(err, "creating post-GC snapshot %s", snapshotName)
+	}
+	
+	gco.postGCSnapshot = fmt.Sprintf("%s@%s", datasetPath, snapshotName)
+	return nil
+}
+
+// rollbackToPreGCSnapshot rolls back to the pre-GC snapshot
+func (gco *GCOptimizer) rollbackToPreGCSnapshot() error {
+	if gco.preGCSnapshot == "" {
+		return errors.New("no pre-GC snapshot available for rollback")
+	}
+	
+	// Extract dataset and snapshot name
+	parts := strings.Split(gco.preGCSnapshot, "@")
+	if len(parts) != 2 {
+		return errors.New("invalid snapshot name format")
+	}
+	
+	datasetPath := parts[0]
+	snapshotName := parts[1]
+	
+	// Rollback to snapshot
+	cmd := exec.Command("zfs", "rollback", "-r", fmt.Sprintf("%s@%s", datasetPath, snapshotName))
+	if err := cmd.Run(); err != nil {
+		return errors.Wrapf(err, "rolling back to snapshot %s", gco.preGCSnapshot)
+	}
+	
+	return nil
+}
+
+// getSpaceUsage returns the current space usage of the ZFS dataset
+func (gco *GCOptimizer) getSpaceUsage() (int64, error) {
+	datasetPath := gco.config.GetDatasetPath()
+	return gco.zfsManager.GetUsedSpace(datasetPath)
+}
+
+// updateGCStatistics updates garbage collection statistics
+func (gco *GCOptimizer) updateGCStatistics(reclaimedSpace int64) {
+	gco.lastGCTime = time.Now()
+	gco.gcCount++
+	gco.totalReclaimed += reclaimedSpace
+}
+
+// optimizeZFSAfterGC performs ZFS optimizations after garbage collection
+func (gco *GCOptimizer) optimizeZFSAfterGC() error {
+	datasetPath := gco.config.GetDatasetPath()
+	
+	// Force ZFS to recalculate compression and deduplication ratios
+	if gco.config.Compression != "off" {
+		// Trigger compression recalculation by touching a property
+		currentCompression, err := gco.zfsManager.GetProperty(datasetPath, "compression")
+		if err == nil {
+			gco.zfsManager.SetProperty(datasetPath, "compression", currentCompression)
+		}
+	}
+	
+	if gco.config.Deduplication {
+		// Trigger deduplication table optimization
+		cmd := exec.Command("zpool", "scrub", gco.config.PoolName)
+		cmd.Run() // Don't fail if scrub can't start
+	}
+	
+	// Optimize record size based on current usage patterns
+	if err := gco.optimizeRecordSize(); err != nil {
+		// Log error but don't fail
+		return err
+	}
+	
+	return nil
+}
+
+// optimizeRecordSize adjusts ZFS record size based on usage patterns
+func (gco *GCOptimizer) optimizeRecordSize() error {
+	datasetPath := gco.config.GetDatasetPath()
+	
+	// Get current compression ratio
+	compressionRatio, err := gco.zfsManager.GetCompressionRatio(datasetPath)
+	if err != nil {
+		return err
+	}
+	
+	// Get current record size
+	currentRecordSize, err := gco.zfsManager.GetProperty(datasetPath, "recordsize")
+	if err != nil {
+		return err
+	}
+	
+	// Optimize based on compression efficiency
+	var newRecordSize string
+	
+	if compressionRatio > 2.0 {
+		// Good compression, can use larger record size
+		if currentRecordSize == "128K" {
+			newRecordSize = "1M"
+		}
+	} else if compressionRatio < 1.2 {
+		// Poor compression, use smaller record size
+		if currentRecordSize == "1M" {
+			newRecordSize = "128K"
+		}
+	}
+	
+	// Apply new record size if different
+	if newRecordSize != "" && newRecordSize != currentRecordSize {
+		return gco.zfsManager.SetProperty(datasetPath, "recordsize", newRecordSize)
+	}
+	
+	return nil
+}
+
+// cleanupOldGCSnapshots removes old GC snapshots beyond retention limit
+func (gco *GCOptimizer) cleanupOldGCSnapshots() error {
+	datasetPath := gco.config.GetDatasetPath()
+	
+	snapshots, err := gco.zfsManager.ListSnapshots(datasetPath)
+	if err != nil {
+		return err
+	}
+	
+	// Filter GC snapshots
+	var gcSnapshots []string
+	for _, snapshot := range snapshots {
+		if strings.Contains(snapshot, "pre-gc-") || strings.Contains(snapshot, "post-gc-") {
+			gcSnapshots = append(gcSnapshots, snapshot)
+		}
+	}
+	
+	// Keep only the most recent GC snapshots (configurable limit)
+	maxGCSnapshots := 10 // Keep last 10 GC operations
+	if len(gcSnapshots) > maxGCSnapshots {
+		toDelete := len(gcSnapshots) - maxGCSnapshots
+		for i := 0; i < toDelete; i++ {
+			if err := gco.zfsManager.DeleteSnapshot(gcSnapshots[i]); err != nil {
+				// Log error but continue with other snapshots
+				continue
+			}
+		}
+	}
+	
+	return nil
+}
+
+// GetGCStatistics returns current garbage collection statistics
+func (gco *GCOptimizer) GetGCStatistics() *GCStatistics {
+	return &GCStatistics{
+		LastGCTime:     gco.lastGCTime,
+		GCCount:        gco.gcCount,
+		TotalReclaimed: gco.totalReclaimed,
+		PreGCSnapshot:  gco.preGCSnapshot,
+		PostGCSnapshot: gco.postGCSnapshot,
+	}
+}
+
+// GCStatistics contains garbage collection statistics
+type GCStatistics struct {
+	LastGCTime     time.Time `json:"last_gc_time"`
+	GCCount        int64     `json:"gc_count"`
+	TotalReclaimed int64     `json:"total_reclaimed"`
+	PreGCSnapshot  string    `json:"pre_gc_snapshot"`
+	PostGCSnapshot string    `json:"post_gc_snapshot"`
+}
+
+// ScheduleOptimizedGC schedules garbage collection with ZFS optimizations
+func (gco *GCOptimizer) ScheduleOptimizedGC(ctx context.Context, repoPath string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := gco.OptimizeGarbageCollection(ctx, repoPath); err != nil {
+				// Log error but continue scheduling
+				fmt.Printf("Scheduled GC failed: %v\n", err)
+			}
+		}
+	}
+}
+
+// GetOptimalGCInterval returns the optimal garbage collection interval based on ZFS metrics
+func (gco *GCOptimizer) GetOptimalGCInterval() time.Duration {
+	// Get current space usage and compression ratio
+	datasetPath := gco.config.GetDatasetPath()
+	
+	compressionRatio, err := gco.zfsManager.GetCompressionRatio(datasetPath)
+	if err != nil {
+		compressionRatio = 1.0 // Default if unable to get ratio
+	}
+	
+	usedSpace, err := gco.zfsManager.GetUsedSpace(datasetPath)
+	if err != nil {
+		usedSpace = 0 // Default if unable to get space
+	}
+	
+	// Base interval
+	baseInterval := 2 * time.Hour
+	
+	// Adjust based on compression ratio (better compression = less frequent GC)
+	if compressionRatio > 2.0 {
+		baseInterval = 4 * time.Hour
+	} else if compressionRatio < 1.2 {
+		baseInterval = 1 * time.Hour
+	}
+	
+	// Adjust based on space usage (more space = less frequent GC)
+	if usedSpace > 100*1024*1024*1024 { // > 100GB
+		baseInterval = baseInterval * 2
+	} else if usedSpace < 10*1024*1024*1024 { // < 10GB
+		baseInterval = baseInterval / 2
+	}
+	
+	// Ensure minimum interval
+	if baseInterval < 30*time.Minute {
+		baseInterval = 30 * time.Minute
+	}
+	
+	return baseInterval
+}
+
+// EstimateGCBenefit estimates the potential benefit of running garbage collection
+func (gco *GCOptimizer) EstimateGCBenefit() (*GCBenefitEstimate, error) {
+	datasetPath := gco.config.GetDatasetPath()
+	
+	// Get current metrics
+	usedSpace, err := gco.zfsManager.GetUsedSpace(datasetPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	compressionRatio, err := gco.zfsManager.GetCompressionRatio(datasetPath)
+	if err != nil {
+		compressionRatio = 1.0
+	}
+	
+	// Estimate reclaimable space based on historical data and heuristics
+	// This is a simplified estimation - in production, use more sophisticated models
+	var estimatedReclaim int64
+	
+	// Base estimate: 5-15% of used space is typically reclaimable
+	baseReclaim := usedSpace / 10 // 10%
+	
+	// Adjust based on compression ratio
+	if compressionRatio > 2.0 {
+		// Good compression suggests less waste
+		estimatedReclaim = baseReclaim / 2
+	} else {
+		// Poor compression suggests more waste
+		estimatedReclaim = baseReclaim * 2
+	}
+	
+	// Adjust based on time since last GC
+	timeSinceLastGC := time.Since(gco.lastGCTime)
+	if timeSinceLastGC > 24*time.Hour {
+		estimatedReclaim = estimatedReclaim * 2
+	}
+	
+	return &GCBenefitEstimate{
+		EstimatedReclaimableSpace: estimatedReclaim,
+		CurrentUsedSpace:          usedSpace,
+		CompressionRatio:          compressionRatio,
+		TimeSinceLastGC:           timeSinceLastGC,
+		RecommendGC:               estimatedReclaim > usedSpace/20, // Recommend if >5% reclaimable
+	}, nil
+}
+
+// GCBenefitEstimate contains an estimate of garbage collection benefits
+type GCBenefitEstimate struct {
+	EstimatedReclaimableSpace int64         `json:"estimated_reclaimable_space"`
+	CurrentUsedSpace          int64         `json:"current_used_space"`
+	CompressionRatio          float64       `json:"compression_ratio"`
+	TimeSinceLastGC           time.Duration `json:"time_since_last_gc"`
+	RecommendGC               bool          `json:"recommend_gc"`
+}

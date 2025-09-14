@@ -1,54 +1,52 @@
-# Build stage
-FROM golang:1.21-alpine AS builder
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.24-bullseye AS builder
 
-# Install build dependencies
-RUN apk add --no-cache git ca-certificates tzdata
+# This dockerfile builds and runs ipfs-cluster-service.
+ARG TARGETOS TARGETARCH
 
-# Set working directory
-WORKDIR /app
+ENV GOPATH=/go
+ENV SRC_PATH=$GOPATH/src/github.com/ipfs-cluster/ipfs-cluster
+ENV GOPROXY=https://proxy.golang.org
 
-# Copy go mod files
-COPY go.mod go.sum ./
+COPY --chown=1000:users go.* $SRC_PATH/
+WORKDIR $SRC_PATH
+RUN go mod download -x
 
-# Download dependencies
-RUN go mod download
+COPY --chown=1000:users . $SRC_PATH
+RUN git config --global --add safe.directory /go/src/github.com/ipfs-cluster/ipfs-cluster
 
-# Copy source code
-COPY . .
+ENV CGO_ENABLED=0
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make build
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gdc ./cmd/gdc
+#------------------------------------------------------
+FROM alpine:3.21
 
-# Final stage
-FROM alpine:latest
+LABEL org.opencontainers.image.source=https://github.com/ipfs-cluster/ipfs-cluster
+LABEL org.opencontainers.image.description="Pinset orchestration for IPFS"
+LABEL org.opencontainers.image.licenses=MIT+APACHE_2.0
 
-# Install runtime dependencies
-RUN apk --no-cache add ca-certificates tzdata
+# Install binaries for $TARGETARCH
+RUN apk add --no-cache tini su-exec ca-certificates
 
-# Create non-root user
-RUN adduser -D -s /bin/sh gdc
+ENV GOPATH=/go
+ENV SRC_PATH=/go/src/github.com/ipfs-cluster/ipfs-cluster
+ENV IPFS_CLUSTER_PATH=/data/ipfs-cluster
+ENV IPFS_CLUSTER_CONSENSUS=crdt
 
-# Set working directory
-WORKDIR /app
+EXPOSE 9094
+EXPOSE 9095
+EXPOSE 9096
 
-# Copy binary from builder stage
-COPY --from=builder /app/gdc .
+COPY --from=builder $SRC_PATH/cmd/ipfs-cluster-service/ipfs-cluster-service /usr/local/bin/ipfs-cluster-service
+COPY --from=builder $SRC_PATH/cmd/ipfs-cluster-ctl/ipfs-cluster-ctl /usr/local/bin/ipfs-cluster-ctl
+COPY --from=builder $SRC_PATH/cmd/ipfs-cluster-follow/ipfs-cluster-follow /usr/local/bin/ipfs-cluster-follow
+COPY --from=builder $SRC_PATH/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Copy configuration files
-COPY --from=builder /app/configs ./configs
+RUN mkdir -p $IPFS_CLUSTER_PATH && \
+    adduser -D -h $IPFS_CLUSTER_PATH -u 1000 -G users ipfs && \
+    chown ipfs:users $IPFS_CLUSTER_PATH
 
-# Change ownership
-RUN chown -R gdc:gdc /app
+VOLUME $IPFS_CLUSTER_PATH
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
-# Switch to non-root user
-USER gdc
-
-# Expose ports
-EXPOSE 8080 9090 9091
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
-
-# Run the application
-CMD ["./gdc"]
+# Defaults for ipfs-cluster-service go here
+CMD ["daemon"]

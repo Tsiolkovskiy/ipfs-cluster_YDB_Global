@@ -1,0 +1,49 @@
+---
+- name: Clone IPFS Cluster repository
+  git:
+    repo: https://github.com/ipfs/ipfs-cluster.git
+    dest: /opt/ipfs-cluster
+    version: master
+    
+- name: Build IPFS Cluster
+  command: make build
+  args:
+    chdir: /opt/ipfs-cluster
+  environment:
+    PATH: "/usr/local/go/bin:{{ ansible_env.PATH }}"
+    
+- name: Install IPFS Cluster binaries
+  copy:
+    src: "/opt/ipfs-cluster/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+    remote_src: yes
+  loop:
+    - ipfs-cluster-service
+    - ipfs-cluster-ctl
+    - ipfs-cluster-follow
+    
+- name: Create IPFS Cluster user
+  user:
+    name: ipfs-cluster
+    system: yes
+    shell: /bin/bash
+    home: /var/lib/ipfs-cluster
+    
+- name: Create IPFS Cluster directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: ipfs-cluster
+    group: ipfs-cluster
+    mode: '0755'
+  loop:
+    - /var/lib/ipfs-cluster
+    - /var/log/ipfs-cluster
+    - /etc/ipfs-cluster
+    
+- name: Initialize IPFS Cluster configuration
+  become_user: ipfs-cluster
+  command: ipfs-cluster-service init --config-dir /var/lib/ipfs-cluster
+  args:
+    creates: /var/lib/ipfs-cluster/service.json

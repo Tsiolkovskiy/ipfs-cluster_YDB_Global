@@ -1,0 +1,212 @@
+version: '3.8'
+
+services:
+  zfs-setup:
+    image: ubuntu:22.04
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /sys:/sys
+      - /proc:/proc
+      - zfs-pools:/zfs-pools
+    command: |
+      bash -c "
+        apt-get update && apt-get install -y zfsutils-linux
+        
+        # Create loop devices for testing
+        truncate -s 10G /zfs-pools/hot-tier.img
+        truncate -s 50G /zfs-pools/warm-tier.img  
+        truncate -s 100G /zfs-pools/cold-tier.img
+        
+        losetup /dev/loop1 /zfs-pools/hot-tier.img
+        losetup /dev/loop2 /zfs-pools/warm-tier.img
+        losetup /dev/loop3 /zfs-pools/cold-tier.img
+        
+        # Create ZFS pools
+        zpool create -f hot-tier -o ashift=12 -O compression=lz4 -O recordsize=128K /dev/loop1
+        zpool create -f warm-tier -o ashift=12 -O compression=gzip-6 -O recordsize=1M /dev/loop2
+        zpool create -f cold-tier -o ashift=12 -O compression=zstd -O recordsize=1M /dev/loop3
+        
+        # Create datasets
+        zfs create hot-tier/ipfs-cluster
+        zfs create hot-tier/ipfs-cluster/metadata
+        zfs create hot-tier/ipfs-cluster/hot-shards
+        
+        zfs create warm-tier/ipfs-cluster
+        zfs create warm-tier/ipfs-cluster/warm-shards
+        
+        zfs create cold-tier/ipfs-cluster
+        zfs create cold-tier/ipfs-cluster/cold-shards
+        zfs create cold-tier/ipfs-cluster/archive
+        
+        touch /zfs-pools/setup-complete
+      "
+    healthcheck:
+      test: ["CMD", "test", "-f", "/zfs-pools/setup-complete"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  ipfs-node:
+    image: ipfs/kubo:v0.17.0
+    ports:
+      - "4001:4001"
+      - "5001:5001"
+      - "8080:8080"
+    volumes:
+      - ipfs-data:/data/ipfs
+      - zfs-pools:/zfs-pools:ro
+    environment:
+      - IPFS_PROFILE=server
+      - IPFS_PATH=/data/ipfs
+    command: |
+      sh -c "
+        ipfs init --profile=server
+        ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
+        ipfs config Addresses.Gateway /ip4/0.0.0.0/tcp/8080
+        ipfs config --json Swarm.ConnMgr.HighWater 2000
+        ipfs config --json Swarm.ConnMgr.LowWater 500
+        ipfs config --json Datastore.StorageMax '\"100GB\"'
+        ipfs config --json Experimental.FilestoreEnabled true
+        ipfs config --json Experimental.UrlstoreEnabled true
+        ipfs daemon --enable-gc
+      "
+    depends_on:
+      zfs-setup:
+        condition: service_healthy
+
+  cluster-bootstrap:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cluster
+    ports:
+      - "9094:9094"
+      - "9095:9095"
+      - "9096:9096"
+    volumes:
+      - cluster-data-bootstrap:/data/ipfs-cluster
+      - zfs-pools:/zfs-pools
+      - /hot-tier:/hot-tier
+      - /warm-tier:/warm-tier
+      - /cold-tier:/cold-tier
+    environment:
+      - CLUSTER_SECRET=${CLUSTER_SECRET:-$(openssl rand -hex 32)}
+      - CLUSTER_ID=bootstrap
+      - IPFS_API=/ip4/ipfs-node/tcp/5001
+      - ZFS_HOT_TIER=hot-tier/ipfs-cluster
+      - ZFS_WARM_TIER=warm-tier/ipfs-cluster
+      - ZFS_COLD_TIER=cold-tier/ipfs-cluster
+    depends_on:
+      - ipfs-node
+      - zfs-setup
+    command: |
+      sh -c "
+        ipfs-cluster-service init --config-dir /data/ipfs-cluster
+        
+        # Configure ZFS integration
+        cat > /data/ipfs-cluster/service.json << 'EOF'
+        {
+          \"cluster\": {
+            \"secret\": \"$${CLUSTER_SECRET}\",
+            \"listen_multiaddress\": \"/ip4/0.0.0.0/tcp/9096\",
+            \"replication_factor_min\": 2,
+            \"replication_factor_max\": 3
+          },
+          \"ipfs_connector\": {
+            \"zfshttp\": {
+              \"node_multiaddress\": \"/ip4/ipfs-node/tcp/5001\",
+              \"zfs_config\": {
+                \"hot_tier_pool\": \"$${ZFS_HOT_TIER}\",
+                \"warm_tier_pool\": \"$${ZFS_WARM_TIER}\",
+                \"cold_tier_pool\": \"$${ZFS_COLD_TIER}\",
+                \"sharding_strategy\": \"consistent_hash\",
+                \"max_pins_per_shard\": 1000000000,
+                \"compression_enabled\": true,
+                \"deduplication_enabled\": true,
+                \"snapshot_interval\": \"1h\",
+                \"replication_factor\": 3
+              }
+            }
+          },
+          \"monitor\": {
+            \"zfsmetrics\": {
+              \"check_interval\": \"15s\",
+              \"metrics_collection_interval\": \"30s\",
+              \"performance_optimization\": true,
+              \"auto_tuning_enabled\": true
+            }
+          }
+        }
+        EOF
+        
+        ipfs-cluster-service daemon
+      "
+
+  cluster-node:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cluster
+    volumes:
+      - zfs-pools:/zfs-pools
+      - /hot-tier:/hot-tier
+      - /warm-tier:/warm-tier
+      - /cold-tier:/cold-tier
+    environment:
+      - CLUSTER_SECRET=${CLUSTER_SECRET}
+      - IPFS_API=/ip4/ipfs-node/tcp/5001
+      - BOOTSTRAP_PEER=/ip4/cluster-bootstrap/tcp/9096
+      - ZFS_HOT_TIER=hot-tier/ipfs-cluster
+      - ZFS_WARM_TIER=warm-tier/ipfs-cluster
+      - ZFS_COLD_TIER=cold-tier/ipfs-cluster
+    depends_on:
+      - cluster-bootstrap
+    command: |
+      sh -c "
+        ipfs-cluster-service init --config-dir /data/ipfs-cluster
+        
+        # Get bootstrap peer ID
+        BOOTSTRAP_ID=$$(curl -s http://cluster-bootstrap:9094/api/v0/id | jq -r .id)
+        
+        cat > /data/ipfs-cluster/service.json << EOF
+        {
+          \"cluster\": {
+            \"secret\": \"$${CLUSTER_SECRET}\",
+            \"listen_multiaddress\": \"/ip4/0.0.0.0/tcp/9096\",
+            \"bootstrap\": [\"/ip4/cluster-bootstrap/tcp/9096/p2p/$${BOOTSTRAP_ID}\"],
+            \"replication_factor_min\": 2,
+            \"replication_factor_max\": 3
+          },
+          \"ipfs_connector\": {
+            \"zfshttp\": {
+              \"node_multiaddress\": \"/ip4/ipfs-node/tcp/5001\",
+              \"zfs_config\": {
+                \"hot_tier_pool\": \"$${ZFS_HOT_TIER}\",
+                \"warm_tier_pool\": \"$${ZFS_WARM_TIER}\",
+                \"cold_tier_pool\": \"$${ZFS_COLD_TIER}\",
+                \"sharding_strategy\": \"consistent_hash\",
+                \"max_pins_per_shard\": 1000000000,
+                \"compression_enabled\": true,
+                \"deduplication_enabled\": true,
+                \"snapshot_interval\": \"1h\",
+                \"replication_factor\": 3
+              }
+            }
+          },
+          \"monitor\": {
+            \"zfsmetrics\": {
+              \"check_interval\": \"15s\",
+              \"metrics_collection_interval\": \"30s\",
+              \"performance_optimization\": true,
+              \"auto_tuning_enabled\": true
+            }
+          }
+        }
+        EOF
+        
+        ipfs-cluster-service daemon
+      "
+
+volumes:
+  ipfs-data:
+  cluster-data-bootstrap:
+  zfs-pools:

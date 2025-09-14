@@ -1,0 +1,503 @@
+package zfshttp
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/pkg/errors"
+)
+
+// KuboConfig represents the IPFS Kubo configuration optimized for ZFS
+type KuboConfig struct {
+	// Core IPFS configuration
+	Identity    IdentityConfig    `json:"Identity"`
+	Datastore   DatastoreConfig   `json:"Datastore"`
+	Addresses   AddressesConfig   `json:"Addresses"`
+	Discovery   DiscoveryConfig   `json:"Discovery"`
+	Routing     RoutingConfig     `json:"Routing"`
+	Reprovider  ReproviderConfig  `json:"Reprovider"`
+	Gateway     GatewayConfig     `json:"Gateway"`
+	API         APIConfig         `json:"API"`
+	Swarm       SwarmConfig       `json:"Swarm"`
+	
+	// ZFS-specific optimizations
+	ZFSOptimizations ZFSOptimizationsConfig `json:"ZFSOptimizations,omitempty"`
+}
+
+// IdentityConfig contains the node identity
+type IdentityConfig struct {
+	PeerID  string `json:"PeerID"`
+	PrivKey string `json:"PrivKey"`
+}
+
+// DatastoreConfig configures the datastore with ZFS optimizations
+type DatastoreConfig struct {
+	StorageMax         string                 `json:"StorageMax"`
+	StorageGCWatermark int                    `json:"StorageGCWatermark"`
+	GCPeriod           string                 `json:"GCPeriod"`
+	HashOnRead         bool                   `json:"HashOnRead"`
+	BloomFilterSize    int                    `json:"BloomFilterSize"`
+	Spec               map[string]interface{} `json:"Spec"`
+}
+
+// AddressesConfig configures network addresses
+type AddressesConfig struct {
+	Swarm     []string `json:"Swarm"`
+	Announce  []string `json:"Announce,omitempty"`
+	NoAnnounce []string `json:"NoAnnounce,omitempty"`
+	API       string   `json:"API"`
+	Gateway   string   `json:"Gateway"`
+}
+
+// DiscoveryConfig configures peer discovery
+type DiscoveryConfig struct {
+	MDNS MDNSConfig `json:"MDNS"`
+}
+
+// MDNSConfig configures mDNS discovery
+type MDNSConfig struct {
+	Enabled  bool `json:"Enabled"`
+	Interval int  `json:"Interval"`
+}
+
+// RoutingConfig configures content routing
+type RoutingConfig struct {
+	Type string `json:"Type"`
+}
+
+// ReproviderConfig configures content reproviding
+type ReproviderConfig struct {
+	Interval string `json:"Interval"`
+	Strategy string `json:"Strategy"`
+}
+
+// GatewayConfig configures the HTTP gateway
+type GatewayConfig struct {
+	HTTPHeaders map[string][]string `json:"HTTPHeaders,omitempty"`
+	RootRedirect string             `json:"RootRedirect,omitempty"`
+	Writable     bool               `json:"Writable"`
+}
+
+// APIConfig configures the HTTP API
+type APIConfig struct {
+	HTTPHeaders map[string][]string `json:"HTTPHeaders,omitempty"`
+}
+
+// SwarmConfig configures the libp2p swarm
+type SwarmConfig struct {
+	AddrFilters                []string          `json:"AddrFilters,omitempty"`
+	DisableBandwidthMetrics    bool              `json:"DisableBandwidthMetrics"`
+	DisableNatPortMap          bool              `json:"DisableNatPortMap"`
+	EnableAutoRelay            bool              `json:"EnableAutoRelay"`
+	EnableRelayHop             bool              `json:"EnableRelayHop"`
+	ConnMgr                    ConnMgrConfig     `json:"ConnMgr"`
+	ResourceMgr                ResourceMgrConfig `json:"ResourceMgr"`
+}
+
+// ConnMgrConfig configures connection management
+type ConnMgrConfig struct {
+	Type        string `json:"Type"`
+	LowWater    int    `json:"LowWater"`
+	HighWater   int    `json:"HighWater"`
+	GracePeriod string `json:"GracePeriod"`
+}
+
+// ResourceMgrConfig configures resource management
+type ResourceMgrConfig struct {
+	Enabled bool `json:"Enabled"`
+}
+
+// ZFSOptimizationsConfig contains ZFS-specific optimizations
+type ZFSOptimizationsConfig struct {
+	// ZFS dataset path for IPFS data
+	DatasetPath string `json:"DatasetPath"`
+	
+	// Enable ZFS compression
+	CompressionEnabled bool `json:"CompressionEnabled"`
+	
+	// ZFS compression algorithm
+	CompressionAlgorithm string `json:"CompressionAlgorithm"`
+	
+	// Enable ZFS deduplication
+	DeduplicationEnabled bool `json:"DeduplicationEnabled"`
+	
+	// ZFS record size optimization
+	RecordSize string `json:"RecordSize"`
+	
+	// Enable automatic snapshots
+	SnapshotsEnabled bool `json:"SnapshotsEnabled"`
+	
+	// Snapshot interval in seconds
+	SnapshotInterval int `json:"SnapshotInterval"`
+	
+	// Maximum number of snapshots to retain
+	MaxSnapshots int `json:"MaxSnapshots"`
+	
+	// Enable ZFS ARC optimization
+	ARCOptimization bool `json:"ARCOptimization"`
+	
+	// ZFS sync mode
+	SyncMode string `json:"SyncMode"`
+}
+
+// NewOptimizedKuboConfig creates a new Kubo configuration optimized for ZFS
+func NewOptimizedKuboConfig(repoPath string, zfsConfig *Config) (*KuboConfig, error) {
+	config := &KuboConfig{
+		Identity: IdentityConfig{
+			// These would be generated during init
+			PeerID:  "",
+			PrivKey: "",
+		},
+		
+		Datastore: DatastoreConfig{
+			StorageMax:         "100GB", // Increased for large-scale operations
+			StorageGCWatermark: 85,      // Reduced to prevent ZFS pool exhaustion
+			GCPeriod:           "1h",    // More frequent GC for better space management
+			HashOnRead:         false,   // Disabled as ZFS provides checksums
+			BloomFilterSize:    1048576, // Increased for better performance with large datasets
+			Spec: map[string]interface{}{
+				"type": "mount",
+				"mounts": []map[string]interface{}{
+					{
+						"mountpoint": "/blocks",
+						"type":       "zfs",
+						"path":       "blocks",
+						"zfsConfig": map[string]interface{}{
+							"poolName":       zfsConfig.PoolName,
+							"datasetName":    zfsConfig.DatasetName + "/blocks",
+							"compression":    zfsConfig.Compression,
+							"recordsize":     zfsConfig.RecordSize,
+							"deduplication":  zfsConfig.Deduplication,
+							"sync":           zfsConfig.Sync,
+						},
+					},
+					{
+						"mountpoint": "/",
+						"type":       "zfs",
+						"path":       "metadata",
+						"zfsConfig": map[string]interface{}{
+							"poolName":       zfsConfig.PoolName,
+							"datasetName":    zfsConfig.DatasetName + "/metadata",
+							"compression":    "lz4",      // Fast compression for metadata
+							"recordsize":     "32K",      // Smaller record size for metadata
+							"deduplication":  false,      // Metadata typically doesn't dedupe well
+							"sync":           "standard", // Standard sync for metadata
+						},
+					},
+				},
+			},
+		},
+		
+		Addresses: AddressesConfig{
+			Swarm: []string{
+				"/ip4/0.0.0.0/tcp/4001",
+				"/ip6/::/tcp/4001",
+				"/ip4/0.0.0.0/udp/4001/quic",
+				"/ip6/::/udp/4001/quic",
+			},
+			API:     "/ip4/127.0.0.1/tcp/5001",
+			Gateway: "/ip4/127.0.0.1/tcp/8080",
+		},
+		
+		Discovery: DiscoveryConfig{
+			MDNS: MDNSConfig{
+				Enabled:  true,
+				Interval: 10,
+			},
+		},
+		
+		Routing: RoutingConfig{
+			Type: "dhtclient", // Use DHT client mode for cluster nodes
+		},
+		
+		Reprovider: ReproviderConfig{
+			Interval: "12h", // Reduced frequency for large-scale deployments
+			Strategy: "pinned",
+		},
+		
+		Gateway: GatewayConfig{
+			Writable: false, // Disable for security in cluster deployments
+			HTTPHeaders: map[string][]string{
+				"Access-Control-Allow-Origin":  {"*"},
+				"Access-Control-Allow-Methods": {"GET"},
+				"Access-Control-Allow-Headers": {"X-Requested-With", "Range", "User-Agent"},
+			},
+		},
+		
+		API: APIConfig{
+			HTTPHeaders: map[string][]string{
+				"Server": {"go-ipfs/0.x.x"},
+			},
+		},
+		
+		Swarm: SwarmConfig{
+			DisableBandwidthMetrics: false, // Keep metrics for monitoring
+			DisableNatPortMap:       true,  // Disable for server deployments
+			EnableAutoRelay:         false, // Disable for server deployments
+			EnableRelayHop:          false, // Disable for server deployments
+			ConnMgr: ConnMgrConfig{
+				Type:        "basic",
+				LowWater:    600,  // Increased for cluster operations
+				HighWater:   900,  // Increased for cluster operations
+				GracePeriod: "20s",
+			},
+			ResourceMgr: ResourceMgrConfig{
+				Enabled: true, // Enable resource management
+			},
+		},
+		
+		ZFSOptimizations: ZFSOptimizationsConfig{
+			DatasetPath:          zfsConfig.GetDatasetPath(),
+			CompressionEnabled:   zfsConfig.Compression != "off",
+			CompressionAlgorithm: zfsConfig.Compression,
+			DeduplicationEnabled: zfsConfig.Deduplication,
+			RecordSize:           zfsConfig.RecordSize,
+			SnapshotsEnabled:     zfsConfig.SnapshotInterval > 0,
+			SnapshotInterval:     zfsConfig.SnapshotInterval,
+			MaxSnapshots:         zfsConfig.MaxSnapshots,
+			ARCOptimization:      true,
+			SyncMode:             zfsConfig.Sync,
+		},
+	}
+	
+	return config, nil
+}
+
+// WriteToFile writes the Kubo configuration to a file
+func (kc *KuboConfig) WriteToFile(configPath string) error {
+	// Ensure directory exists
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return errors.Wrapf(err, "creating config directory %s", dir)
+	}
+	
+	// Marshal to JSON with indentation
+	data, err := json.MarshalIndent(kc, "", "  ")
+	if err != nil {
+		return errors.Wrap(err, "marshaling config to JSON")
+	}
+	
+	// Write to file
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return errors.Wrapf(err, "writing config to %s", configPath)
+	}
+	
+	return nil
+}
+
+// LoadFromFile loads Kubo configuration from a file
+func LoadKuboConfigFromFile(configPath string) (*KuboConfig, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "reading config from %s", configPath)
+	}
+	
+	var config KuboConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, errors.Wrap(err, "unmarshaling config from JSON")
+	}
+	
+	return &config, nil
+}
+
+// OptimizeForZFS applies ZFS-specific optimizations to the configuration
+func (kc *KuboConfig) OptimizeForZFS(zfsConfig *Config) {
+	// Optimize datastore settings for ZFS
+	kc.Datastore.HashOnRead = false // ZFS provides checksums
+	kc.Datastore.StorageGCWatermark = 85 // Conservative to prevent ZFS pool exhaustion
+	kc.Datastore.BloomFilterSize = 1048576 // Larger bloom filter for better performance
+	
+	// Optimize connection settings for high-throughput
+	kc.Swarm.ConnMgr.LowWater = 600
+	kc.Swarm.ConnMgr.HighWater = 900
+	kc.Swarm.DisableBandwidthMetrics = false // Keep metrics for ZFS optimization
+	
+	// Optimize reprovider for large datasets
+	kc.Reprovider.Interval = "12h" // Less frequent reproviding
+	kc.Reprovider.Strategy = "pinned"
+	
+	// Update ZFS optimizations
+	kc.ZFSOptimizations.DatasetPath = zfsConfig.GetDatasetPath()
+	kc.ZFSOptimizations.CompressionEnabled = zfsConfig.Compression != "off"
+	kc.ZFSOptimizations.CompressionAlgorithm = zfsConfig.Compression
+	kc.ZFSOptimizations.DeduplicationEnabled = zfsConfig.Deduplication
+	kc.ZFSOptimizations.RecordSize = zfsConfig.RecordSize
+	kc.ZFSOptimizations.SyncMode = zfsConfig.Sync
+}
+
+// GenerateDatastoreSpec creates a ZFS-optimized datastore specification
+func GenerateZFSDatastoreSpec(zfsConfig *Config) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "mount",
+		"mounts": []map[string]interface{}{
+			{
+				"mountpoint": "/blocks",
+				"type":       "zfs",
+				"path":       "blocks",
+				"zfsConfig": map[string]interface{}{
+					"poolName":       zfsConfig.PoolName,
+					"datasetName":    zfsConfig.DatasetName + "/blocks",
+					"compression":    zfsConfig.Compression,
+					"recordsize":     zfsConfig.RecordSize,
+					"deduplication":  zfsConfig.Deduplication,
+					"sync":           zfsConfig.Sync,
+					"atime":          zfsConfig.ATime,
+					"encryption":     zfsConfig.Encryption,
+				},
+			},
+			{
+				"mountpoint": "/",
+				"type":       "zfs", 
+				"path":       "metadata",
+				"zfsConfig": map[string]interface{}{
+					"poolName":       zfsConfig.PoolName,
+					"datasetName":    zfsConfig.DatasetName + "/metadata",
+					"compression":    "lz4",      // Fast compression for metadata
+					"recordsize":     "32K",      // Smaller records for metadata
+					"deduplication":  false,      // Metadata doesn't dedupe well
+					"sync":           "standard", // Standard sync for metadata
+					"atime":          false,      // Disable atime for metadata
+					"encryption":     zfsConfig.Encryption,
+				},
+			},
+		},
+	}
+}
+
+// ValidateConfiguration validates the Kubo configuration
+func (kc *KuboConfig) ValidateConfiguration() error {
+	// Validate required fields
+	if kc.Addresses.API == "" {
+		return errors.New("API address is required")
+	}
+	
+	if kc.Addresses.Gateway == "" {
+		return errors.New("Gateway address is required")
+	}
+	
+	if len(kc.Addresses.Swarm) == 0 {
+		return errors.New("At least one swarm address is required")
+	}
+	
+	// Validate ZFS optimizations if present
+	if kc.ZFSOptimizations.DatasetPath != "" {
+		if kc.ZFSOptimizations.CompressionEnabled && kc.ZFSOptimizations.CompressionAlgorithm == "" {
+			return errors.New("Compression algorithm must be specified when compression is enabled")
+		}
+		
+		if kc.ZFSOptimizations.SnapshotsEnabled && kc.ZFSOptimizations.SnapshotInterval <= 0 {
+			return errors.New("Snapshot interval must be positive when snapshots are enabled")
+		}
+	}
+	
+	// Validate connection manager settings
+	if kc.Swarm.ConnMgr.LowWater >= kc.Swarm.ConnMgr.HighWater {
+		return errors.New("ConnMgr LowWater must be less than HighWater")
+	}
+	
+	return nil
+}
+
+// GetOptimizedGCSettings returns garbage collection settings optimized for ZFS
+func GetOptimizedGCSettings(zfsConfig *Config) (watermark int, period string) {
+	// Conservative watermark to prevent ZFS pool exhaustion
+	watermark = 85
+	
+	// More frequent GC for better space management with ZFS compression
+	if zfsConfig.Compression != "off" {
+		period = "1h"
+	} else {
+		period = "2h"
+	}
+	
+	return watermark, period
+}
+
+// GetOptimizedBlockstoreSettings returns blockstore settings optimized for ZFS
+func GetOptimizedBlockstoreSettings(zfsConfig *Config) map[string]interface{} {
+	settings := map[string]interface{}{
+		"HashOnRead": false, // ZFS provides checksums
+		"CacheSize":  1024,  // Increased cache size
+	}
+	
+	// Adjust settings based on ZFS configuration
+	if zfsConfig.Deduplication {
+		settings["BloomFilterSize"] = 2097152 // Larger bloom filter for dedup
+	} else {
+		settings["BloomFilterSize"] = 1048576 // Standard bloom filter
+	}
+	
+	return settings
+}
+
+// CreateKuboInitScript creates a script to initialize Kubo with ZFS optimizations
+func CreateKuboInitScript(repoPath string, zfsConfig *Config) (string, error) {
+	script := fmt.Sprintf(`#!/bin/bash
+# IPFS Kubo initialization script with ZFS optimizations
+
+set -e
+
+REPO_PATH="%s"
+ZFS_POOL="%s"
+ZFS_DATASET="%s"
+
+# Create ZFS datasets if they don't exist
+if ! zfs list "$ZFS_POOL/$ZFS_DATASET" >/dev/null 2>&1; then
+    echo "Creating ZFS dataset: $ZFS_POOL/$ZFS_DATASET"
+    zfs create "$ZFS_POOL/$ZFS_DATASET"
+fi
+
+if ! zfs list "$ZFS_POOL/$ZFS_DATASET/blocks" >/dev/null 2>&1; then
+    echo "Creating ZFS dataset for blocks: $ZFS_POOL/$ZFS_DATASET/blocks"
+    zfs create "$ZFS_POOL/$ZFS_DATASET/blocks"
+    
+    # Optimize for block storage
+    zfs set compression=%s "$ZFS_POOL/$ZFS_DATASET/blocks"
+    zfs set recordsize=%s "$ZFS_POOL/$ZFS_DATASET/blocks"
+    zfs set dedup=%s "$ZFS_POOL/$ZFS_DATASET/blocks"
+    zfs set sync=%s "$ZFS_POOL/$ZFS_DATASET/blocks"
+    zfs set atime=%s "$ZFS_POOL/$ZFS_DATASET/blocks"
+fi
+
+if ! zfs list "$ZFS_POOL/$ZFS_DATASET/metadata" >/dev/null 2>&1; then
+    echo "Creating ZFS dataset for metadata: $ZFS_POOL/$ZFS_DATASET/metadata"
+    zfs create "$ZFS_POOL/$ZFS_DATASET/metadata"
+    
+    # Optimize for metadata storage
+    zfs set compression=lz4 "$ZFS_POOL/$ZFS_DATASET/metadata"
+    zfs set recordsize=32K "$ZFS_POOL/$ZFS_DATASET/metadata"
+    zfs set dedup=off "$ZFS_POOL/$ZFS_DATASET/metadata"
+    zfs set sync=standard "$ZFS_POOL/$ZFS_DATASET/metadata"
+    zfs set atime=off "$ZFS_POOL/$ZFS_DATASET/metadata"
+fi
+
+# Initialize IPFS repository if it doesn't exist
+if [ ! -d "$REPO_PATH" ]; then
+    echo "Initializing IPFS repository at $REPO_PATH"
+    IPFS_PATH="$REPO_PATH" ipfs init
+fi
+
+echo "ZFS-optimized IPFS setup complete"
+`,
+		repoPath,
+		zfsConfig.PoolName,
+		zfsConfig.DatasetName,
+		zfsConfig.Compression,
+		zfsConfig.RecordSize,
+		boolToOnOff(zfsConfig.Deduplication),
+		zfsConfig.Sync,
+		boolToOnOff(zfsConfig.ATime),
+	)
+	
+	return script, nil
+}
+
+// Helper function to convert boolean to ZFS on/off
+func boolToOnOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}

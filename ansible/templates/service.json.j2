@@ -1,0 +1,95 @@
+{
+  "cluster": {
+    "secret": "{{ cluster_secret }}",
+    "leave_on_shutdown": false,
+    "listen_multiaddress": "/ip4/0.0.0.0/tcp/9096",
+    "state_sync_interval": "5m0s",
+    "ipfs_sync_interval": "2m10s",
+    "replication_factor_min": {{ replication_factor_min | default(2) }},
+    "replication_factor_max": {{ replication_factor_max | default(3) }},
+    "monitor_ping_interval": "15s"{% if not (groups['cluster_nodes'][0] == inventory_hostname) %},
+    "bootstrap": [
+      {% for host in groups['cluster_nodes'] %}
+      {% if host != inventory_hostname %}
+      "/ip4/{{ hostvars[host]['ansible_default_ipv4']['address'] }}/tcp/9096/p2p/{{ hostvars[host]['cluster_peer_id'] | default('PEER_ID_PLACEHOLDER') }}"{% if not loop.last %},{% endif %}
+      {% endif %}
+      {% endfor %}
+    ]{% endif %}
+  },
+  "consensus": {
+    "crdt": {
+      "cluster_name": "{{ cluster_name | default('ipfs-cluster-zfs') }}",
+      "trusted_peers": ["*"],
+      "batching": {
+        "max_batch_size": 0,
+        "max_batch_age": "0s"
+      },
+      "repair_interval": "1h0m0s"
+    }
+  },
+  "api": {
+    "ipfsproxy": {
+      "listen_multiaddress": "/ip4/127.0.0.1/tcp/9095",
+      "node_multiaddress": "/ip4/127.0.0.1/tcp/5001",
+      "log_level": "info"
+    },
+    "restapi": {
+      "http_listen_multiaddress": "/ip4/0.0.0.0/tcp/9094",
+      "read_timeout": "30s",
+      "read_header_timeout": "5s",
+      "write_timeout": "60s",
+      "idle_timeout": "120s"
+    }
+  },
+  "ipfs_connector": {
+    "zfshttp": {
+      "node_multiaddress": "/ip4/127.0.0.1/tcp/5001",
+      "connect_swarms_delay": "30s",
+      "pin_timeout": "2m0s",
+      "unpin_timeout": "3m0s",
+      "zfs_config": {
+        "hot_tier_pool": "{{ zfs_hot_tier | default('hot-tier/ipfs-cluster') }}",
+        "warm_tier_pool": "{{ zfs_warm_tier | default('warm-tier/ipfs-cluster') }}", 
+        "cold_tier_pool": "{{ zfs_cold_tier | default('cold-tier/ipfs-cluster') }}",
+        "sharding_strategy": "{{ sharding_strategy | default('consistent_hash') }}",
+        "max_pins_per_shard": {{ max_pins_per_shard | default(1000000000) }},
+        "compression_enabled": {{ compression_enabled | default(true) | lower }},
+        "deduplication_enabled": {{ deduplication_enabled | default(true) | lower }},
+        "snapshot_interval": "{{ snapshot_interval | default('1h') }}",
+        "replication_factor": {{ zfs_replication_factor | default(3) }}
+      }
+    }
+  },
+  "pin_tracker": {
+    "stateless": {
+      "max_pin_queue_size": {{ max_pin_queue_size | default(1000000) }},
+      "concurrent_pins": {{ concurrent_pins | default(256) }}
+    }
+  },
+  "monitor": {
+    "zfsmetrics": {
+      "check_interval": "{{ monitor_check_interval | default('15s') }}",
+      "failure_threshold": {{ monitor_failure_threshold | default(3) }},
+      "metrics_collection_interval": "{{ metrics_collection_interval | default('30s') }}",
+      "performance_optimization": {{ performance_optimization | default(true) | lower }},
+      "auto_tuning_enabled": {{ auto_tuning_enabled | default(true) | lower }}
+    }
+  },
+  "allocator": {
+    "balanced": {
+      "allocate_by": {{ allocate_by | default(['tag:tier', 'freespace']) | to_json }}
+    }
+  },
+  "informer": {
+    "disk": {
+      "metric_ttl": "{{ disk_metric_ttl | default('30s') }}",
+      "metric_type": "freespace"
+    },
+    "tags": {
+      "metric_ttl": "{{ tags_metric_ttl | default('30s') }}",
+      "tags": {
+        "tier": "{{ node_tier | default('auto-detect') }}"
+      }
+    }
+  }
+}
